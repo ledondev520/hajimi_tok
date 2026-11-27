@@ -244,9 +244,12 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
 
     expect((await fetch(`${baseUrl}/api/summary`, { method: "OPTIONS" })).status).toBe(204);
 
-    const healthRes = await fetch(`${baseUrl}/api/health`);
+    const healthRes = await fetch(`${baseUrl}/api/health`, {
+      headers: { Origin: "http://localhost:5173" },
+    });
     expect(healthRes.status).toBe(200);
-    expect(healthRes.headers.get("access-control-allow-origin")).toBe("*");
+    expect(healthRes.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+    expect(healthRes.headers.get("vary")).toBe("Origin");
     expect(((await healthRes.json()) as DataSourceHealth).sqliteReadMode).toBe("wal-readonly");
 
     const summaryRes = await fetch(
@@ -325,18 +328,81 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
   it("supports GET/POST/DELETE /api/calibrations backed by local store", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-http-cal-"));
     try {
-      const store = createCalibrationStore(path.join(tmpDir, "calibrations.json"));
+      const calFile = path.join(tmpDir, "calibrations.json");
+      const store = createCalibrationStore(calFile);
       const base = createMockProviderFixture().provider;
       const provider: TelemetryProvider = {
         ...base,
         getCalibrations: () => store.list(),
-        setCalibration: (k, v) => store.set(k, v),
-        deleteCalibration: (k) => store.remove(k),
+        getCalibrationsState: () => store.readState(),
+        isCalibrationsInitialized: () => store.isInitialized(),
+        setCalibration: (k, v, opts) => store.set(k, v, opts),
+        migrateCalibrationsBatch: (entries) => store.migrateBatch(entries),
+        deleteCalibration: (k, at) => store.remove(k, at),
       };
       const { baseUrl } = await startServer(provider);
       const key = "pool:claude:2026-11-18T01:02:39.000Z";
 
-      expect(await (await fetch(`${baseUrl}/api/calibrations`)).json()).toEqual({ calibrations: {} });
+      expect(await (await fetch(`${baseUrl}/api/calibrations`)).json()).toEqual({
+        calibrations: {},
+        initialized: false,
+      });
+
+      // P2-1: 批量迁移整批预校验——含 1 条非法项时整体 400 且绝不建档
+      const badBatchRes = await fetch(`${baseUrl}/api/calibrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch: {
+            "pool:gemini:2026-11-10T00:00:00.000Z": {
+              remainingPct: 55, calibratedCostUsd: 20, calibratedTokens: 5_000_000, calibratedAt: "2026-11-12T00:00:00.000Z",
+            },
+            "pool:claude:2026-11-10T00:00:00.000Z": {
+              remainingPct: null, calibratedCostUsd: 10, calibratedTokens: 1_000_000, calibratedAt: "2026-11-12T00:00:00.000Z",
+            },
+          },
+        }),
+      });
+      expect(badBatchRes.status).toBe(400);
+      expect(fs.existsSync(calFile)).toBe(false);
+
+      // P2-1: 超过 8KB（60 条普通周历史约 9KB）的合法批量迁移可原子成功
+      const bigBatch: Record<string, { remainingPct: number; calibratedCostUsd: number; calibratedTokens: number; calibratedAt: string }> = {};
+      for (let i = 0; i < 60; i++) {
+        const pool = i % 2 === 0 ? "pool:gemini" : "pool:claude";
+        bigBatch[`${pool}:2026-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:${String(i).padStart(2, "0")}.000Z`] = {
+          remainingPct: 50, calibratedCostUsd: 12.34, calibratedTokens: 1_000_000, calibratedAt: "2026-11-12T00:00:00.000Z",
+        };
+      }
+      expect(JSON.stringify({ batch: bigBatch }).length).toBeGreaterThan(8192);
+      const batchRes = await fetch(`${baseUrl}/api/calibrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batch: bigBatch }),
+      });
+      expect(batchRes.status).toBe(200);
+      expect(((await batchRes.json()) as { initialized: boolean }).initialized).toBe(true);
+
+      // P2-2: 服务端已初始化后，迟到的批量迁移必须返回 409 而不复活已删除键
+      for (const k of Object.keys(bigBatch)) {
+        await fetch(`${baseUrl}/api/calibrations?key=${encodeURIComponent(k)}`, { method: "DELETE" });
+      }
+      const lateBatchRes = await fetch(`${baseUrl}/api/calibrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batch: {
+            "pool:gemini:2026-11-10T00:00:00.000Z": {
+              remainingPct: 55, calibratedCostUsd: 20, calibratedTokens: 5_000_000, calibratedAt: "2026-11-12T00:00:00.000Z",
+            },
+          },
+        }),
+      });
+      expect(lateBatchRes.status).toBe(409);
+      expect(await (await fetch(`${baseUrl}/api/calibrations`)).json()).toEqual({
+        calibrations: {},
+        initialized: true,
+      });
 
       const postRes = await fetch(`${baseUrl}/api/calibrations`, {
         method: "POST",
@@ -360,13 +426,121 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
       });
       expect(badRes.status).toBe(400);
 
-      const delRes = await fetch(`${baseUrl}/api/calibrations?key=${encodeURIComponent(key)}`, {
+      // P2-3: source=auto 且 calibratedAt=null/缺失 必须返回 400，不得补造当前时间覆盖已有 40%
+      const badAutoNullRes = await fetch(`${baseUrl}/api/calibrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key,
+          source: "auto",
+          remainingPct: 65,
+          calibratedCostUsd: 50,
+          calibratedTokens: 1000,
+          calibratedAt: null,
+        }),
+      });
+      expect(badAutoNullRes.status).toBe(400);
+      expect(((await (await fetch(`${baseUrl}/api/calibrations`)).json()) as { calibrations: Record<string, { remainingPct: number }> }).calibrations[key]?.remainingPct).toBe(40);
+
+      const delRes = await fetch(`${baseUrl}/api/calibrations?key=${encodeURIComponent(key)}&at=${encodeURIComponent("2026-11-24T02:00:00.000Z")}`, {
         method: "DELETE",
       });
       expect(delRes.status).toBe(200);
       expect(await delRes.json()).toEqual({ calibrations: {} });
+
+      // P2-1: 删除后，早于删除时刻的旧自动采样不得重建已删键
+      const staleAfterDel = await fetch(`${baseUrl}/api/calibrations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key,
+          source: "auto",
+          remainingPct: 65,
+          calibratedCostUsd: 50,
+          calibratedTokens: 1000,
+          calibratedAt: "2026-11-24T01:30:00.000Z",
+        }),
+      });
+      expect(staleAfterDel.status).toBe(200);
+      expect(((await staleAfterDel.json()) as { calibrations: Record<string, unknown> }).calibrations).toEqual({});
+      // 删除最后一条校准后 initialized 仍为 true，防止旧浏览器回填复活已删记录
+      expect(await (await fetch(`${baseUrl}/api/calibrations`)).json()).toEqual({
+        calibrations: {},
+        initialized: true,
+      });
+
+      // P1: 服务端校准文件损坏时 GET /api/calibrations 必须返回 500 而非 initialized:true 的空表
+      fs.writeFileSync(calFile, "{corrupted-json", "utf8");
+      const corruptGet = await fetch(`${baseUrl}/api/calibrations`);
+      expect(corruptGet.status).toBe(500);
+      expect(((await corruptGet.json()) as { corrupted?: boolean }).corrupted).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces loopback Host/Origin/Sec-Fetch-Site, neutralizes CSV formulas, blocks symlinks, and rejects invalid reset pools", async () => {
+    const baseFixture = createMockProviderFixture();
+    const formulaSummary = baseFixture.provider.getSummary();
+    formulaSummary.conversations = [
+      makeConversation({
+        title: "=HYPERLINK(\"http://evil.test\",\"click\")",
+        workspaceName: "+ws",
+      }),
+    ];
+    const provider: TelemetryProvider = {
+      ...baseFixture.provider,
+      getSummary: () => formulaSummary,
+      addReset: () => [],
+    };
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ag-sec-"));
+    const outsideFile = path.join(os.tmpdir(), `ag-outside-${process.pid}.txt`);
+    try {
+      fs.writeFileSync(outsideFile, "SECRET");
+      fs.writeFileSync(path.join(tmpDir, "index.html"), "ok");
+      fs.symlinkSync(outsideFile, path.join(tmpDir, "leak.txt"));
+
+      const { baseUrl, port } = await startServer(provider, tmpDir);
+
+      // 1. 非受信 Origin 与跨站 Sec-Fetch-Site 均应返回 403
+      expect((await fetch(`${baseUrl}/api/health`, { headers: { Origin: "https://evil.example" } })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/health`, { headers: { Origin: "null" } })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/summary`, { headers: { "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
+
+      // 2. 非回环 Host 头（DNS Rebinding）返回 403
+      const badHostStatus = await new Promise<number>((resolve, reject) => {
+        http
+          .get({ host: "127.0.0.1", port, path: "/api/health", headers: { Host: "evil.attacker.com" } }, (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          })
+          .on("error", reject);
+      });
+      expect(badHostStatus).toBe(403);
+
+      // 3. CSV 公式注入防护：字符串列以 = + - @ 开头加单引号，数值列保持数值语义
+      const csvText = (await (await fetch(`${baseUrl}/api/export.csv`)).text()).slice(1);
+      const dataRow = csvText.split("\n")[1] || "";
+      expect(dataRow).toContain("\"'=HYPERLINK(\"\"http://evil.test\"\",\"\"click\"\")\"");
+      expect(dataRow).toContain(",'+ws,");
+      expect(dataRow).toContain(",146400,");
+
+      // 4. 指向静态目录外的符号链接拒绝读取（含 SPA 回退 index.html）
+      expect((await fetch(`${baseUrl}/leak.txt`)).status).toBe(403);
+      fs.unlinkSync(path.join(tmpDir, "index.html"));
+      fs.symlinkSync(outsideFile, path.join(tmpDir, "index.html"));
+      expect((await fetch(`${baseUrl}/spa/unknown-route`)).status).toBe(403);
+
+      // 5. POST /api/resets 非法 pool 枚举返回 400
+      const badPoolRes = await fetch(`${baseUrl}/api/resets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timestamp: "2026-11-27T00:00:00Z", pool: "typo-pool" }),
+      });
+      expect(badPoolRes.status).toBe(400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(outsideFile, { force: true });
     }
   });
 });

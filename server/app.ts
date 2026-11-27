@@ -8,6 +8,7 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import type {
@@ -19,9 +20,15 @@ import type {
 
 const VALID_CYCLES = new Set<QuotaCycleMode>(["5h", "prev-5h", "7d", "prev-7d", "today", "all"]); // 合法配额周期枚举集合
 const WINDOW_CYCLE_RE = /^window:\d+:\d+$/; // 任意历史周周期窗口标识正则
+const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i; // 仅允许本地回环 Host 头，防御 DNS Rebinding
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]); // 受信回环 Origin 主机名集合
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // 仓库根目录
 const UPDATE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "update.mjs"); // 一键自更新脚本路径
 const SERVICE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "service.mjs"); // 常驻服务脚本路径
+const UPDATE_LOCK_PATH = path.join(
+  process.env.AGY_STATE_DIR?.trim() || path.join(os.homedir(), ".hamiji-sta"),
+  "update.lock"
+); // 与 scripts/update.mjs 共享的跨进程更新锁路径
 const UPDATE_CHECK_TTL_MS = 5 * 60_000; // 更新检测结果缓存 5 分钟，避免反复 git fetch
 
 /**
@@ -103,29 +110,70 @@ const CSV_COLUMNS = [
 ] as const; // CSV 导出固定表头字段序列
 
 /**
- * 职责：为响应对象注入本地开发跨域访问所需的 CORS 响应头。
- * 参数：res — Node HTTP 服务端响应对象。
- * 返回值：无返回值。
+ * 职责：校验请求 Host 头是否为合法本地回环地址（防御 DNS Rebinding）。
+ * 参数：hostHeader — 请求 Host 头。
+ * 返回值：受信回环 Host 返回 true，否则 false。
  */
-function setCorsHeaders(res: http.ServerResponse): void {
-  // 0. 设置跨域许可头，兼容本地 Vite 开发端口访问
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+function isTrustedLoopbackHost(hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+  return LOOPBACK_HOST_RE.test(hostHeader.trim());
 }
 
 /**
- * 职责：安全读取有界 HTTP 请求体并解析为 JSON 对象（上限 8KB 防止滥用）。
- * 参数：req — Node HTTP 请求对象。
+ * 职责：校验可选浏览器 Origin 头是否来自本地回环源（仅放行 http://127.0.0.1|localhost|[::1]）。
+ * 参数：originHeader — 请求 Origin 头。
+ * 返回值：{ allowed, origin }，无 Origin 头时视为同源/CLI 请求返回 allowed=true, origin=null。
+ */
+function resolveTrustedOrigin(originHeader: string | undefined): {
+  allowed: boolean;
+  origin: string | null;
+} {
+  if (!originHeader) return { allowed: true, origin: null };
+  const raw = originHeader.trim();
+  try {
+    const parsed = new URL(raw);
+    if (
+      parsed.origin === raw &&
+      parsed.protocol === "http:" &&
+      LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase())
+    ) {
+      return { allowed: true, origin: raw };
+    }
+  } catch {
+    /* 非法 Origin（如 "null"）一律拒绝 */
+  }
+  return { allowed: false, origin: null };
+}
+
+/**
+ * 职责：仅对受信本地回环 Origin 反射精确 CORS 响应头（绝不返回通配符 *）。
+ * 参数：res — Node HTTP 服务端响应对象；trustedOrigin — 已验证的本地回环 Origin 或 null。
+ * 返回值：无返回值。
+ */
+function setCorsHeaders(res: http.ServerResponse, trustedOrigin: string | null): void {
+  if (trustedOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", trustedOrigin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  }
+}
+
+/**
+ * 职责：安全读取有界 HTTP 请求体并解析为 JSON 对象。
+ * 参数：req — Node HTTP 请求对象；maxBytes — 允许的最大字节数（默认 8KB，批量校准迁移放宽至 256KB）。
  * 返回值：解析后的 Record 对象。
  */
-async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  req: http.IncomingMessage,
+  maxBytes = 8192,
+): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buf.length;
-    if (total > 8192) throw new Error("请求体过大");
+    if (total > maxBytes) throw new Error("请求体过大");
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
@@ -147,10 +195,11 @@ function sendJson(
   statusCode: number,
   payload: unknown,
   extraHeaders?: Record<string, string>,
+  trustedOrigin: string | null = null,
 ): void {
   // 0. 序列化响应体并注入统一头信息
   const body = JSON.stringify(payload);
-  setCorsHeaders(res);
+  setCorsHeaders(res, trustedOrigin);
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     ...extraHeaders,
@@ -203,13 +252,16 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
 }
 
 /**
- * 职责：对单个 CSV 单元格执行 RFC 4180 转义以兼容引号、逗号与换行符。
+ * 职责：对单个 CSV 单元格执行电子表格公式注入防护与 RFC 4180 转义（保留数值列语义）。
  * 参数：value — 原始字段值（字符串、数值或布尔值）。
  * 返回值：安全转义后的 CSV 单元格文本。
  */
 function escapeCsvCell(value: string | number | boolean): string {
-  // 0. 统一转换为字符串形式
-  const text = String(value ?? "");
+  // 0. 统一转换为字符串形式，对以 = + - @ 开头的文本单元格加前导单引号阻断电子表格公式执行
+  let text = String(value ?? "");
+  if (typeof value === "string" && /^[\t\r ]*[=+\-@]/.test(text)) {
+    text = `'${text}`;
+  }
   // 1.1. 包含双引号、逗号或回车换行时，内部双引号双写并在外层加双引号
   if (/[",\r\n]/.test(text)) {
     return `"${text.replace(/"/g, '""')}"`;
@@ -264,20 +316,22 @@ function serveStaticOrFallback(
   rawUrl: string,
   staticDir: string | undefined,
   res: http.ServerResponse,
+  trustedOrigin: string | null = null,
 ): void {
   // 0. 若未配置静态目录或目录不存在，直接返回 404 JSON
   if (!staticDir || !fs.existsSync(staticDir) || !fs.statSync(staticDir).isDirectory()) {
-    sendJson(res, 404, { error: "Not found" });
+    sendJson(res, 404, { error: "Not found" }, undefined, trustedOrigin);
     return;
   }
 
   const staticRoot = path.resolve(staticDir); // 规范化静态资源根绝对路径
+  const realStaticRoot = fs.realpathSync(staticRoot); // 真实物理根路径（阻断符号链接越界读取）
   const rawPathname = rawUrl.split("?")[0] || "/";
   let decodedPath: string;
   try {
     decodedPath = decodeURIComponent(rawPathname);
   } catch {
-    sendJson(res, 400, { error: "Malformed URL path" });
+    sendJson(res, 400, { error: "Malformed URL path" }, undefined, trustedOrigin);
     return;
   }
 
@@ -287,7 +341,7 @@ function serveStaticOrFallback(
     rawPathname.split("/").includes("..") ||
     decodedPath.split("/").includes("..")
   ) {
-    sendJson(res, 403, { error: "Forbidden" });
+    sendJson(res, 403, { error: "Forbidden" }, undefined, trustedOrigin);
     return;
   }
 
@@ -295,30 +349,42 @@ function serveStaticOrFallback(
   const resolvedCandidate = path.resolve(staticRoot, relativeTarget);
   const relFromRoot = path.relative(staticRoot, resolvedCandidate);
   if (relFromRoot.startsWith("..") || path.isAbsolute(relFromRoot)) {
-    sendJson(res, 403, { error: "Forbidden" });
+    sendJson(res, 403, { error: "Forbidden" }, undefined, trustedOrigin);
     return;
   }
 
-  // 1.2. 若请求路径精确命中静态文件，则按后缀输出对应 MIME 内容
+  // 1.2. 若请求路径精确命中静态文件，校验符号链接真实路径仍落在静态根内后输出
   if (fs.existsSync(resolvedCandidate) && fs.statSync(resolvedCandidate).isFile()) {
-    const ext = path.extname(resolvedCandidate).toLowerCase();
+    const realCandidate = fs.realpathSync(resolvedCandidate);
+    const realRel = path.relative(realStaticRoot, realCandidate);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
+      sendJson(res, 403, { error: "Forbidden" }, undefined, trustedOrigin);
+      return;
+    }
+    const ext = path.extname(realCandidate).toLowerCase();
     const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
-    setCorsHeaders(res);
+    setCorsHeaders(res, trustedOrigin);
     res.writeHead(200, { "Content-Type": contentType });
-    res.end(fs.readFileSync(resolvedCandidate));
+    res.end(fs.readFileSync(realCandidate));
     return;
   }
 
-  // 2. SPA 路由回退至 index.html
+  // 2. SPA 路由回退至 index.html（同样校验真实路径不越出静态根）
   const indexHtmlPath = path.join(staticRoot, "index.html");
   if (fs.existsSync(indexHtmlPath) && fs.statSync(indexHtmlPath).isFile()) {
-    setCorsHeaders(res);
+    const realIndex = fs.realpathSync(indexHtmlPath);
+    const realIndexRel = path.relative(realStaticRoot, realIndex);
+    if (realIndexRel.startsWith("..") || path.isAbsolute(realIndexRel)) {
+      sendJson(res, 403, { error: "Forbidden" }, undefined, trustedOrigin);
+      return;
+    }
+    setCorsHeaders(res, trustedOrigin);
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(fs.readFileSync(indexHtmlPath));
+    res.end(fs.readFileSync(realIndex));
     return;
   }
 
-  sendJson(res, 404, { error: "Not found" });
+  sendJson(res, 404, { error: "Not found" }, undefined, trustedOrigin);
 }
 
 /**
@@ -347,114 +413,207 @@ export function createTelemetryHttpServer(
     }
   })();
 
-  // 0.1. 构建无框架原生 HTTP 服务器并统一包裹异常边界
+  // 0.1. 构建无框架原生 HTTP 服务器并统一包裹安全来源边界与异常边界
   return http.createServer(async (req, res) => {
+    let trustedOrigin: string | null = null;
     try {
-      // 1.1. 优先响应 CORS 预检请求
+      // 1.0. 严格校验本地回环 Host、Origin 与跨站请求边界，阻止外部网页窃取遥测数据或触发本地写操作
+      if (!isTrustedLoopbackHost(req.headers.host)) {
+        sendJson(res, 403, { error: "Forbidden host" });
+        return;
+      }
+      const originCheck = resolveTrustedOrigin(req.headers.origin);
+      if (!originCheck.allowed) {
+        sendJson(res, 403, { error: "Forbidden origin" });
+        return;
+      }
+      trustedOrigin = originCheck.origin;
+
+      const url = new URL(req.url ?? "/", "http://127.0.0.1"); // 解析请求路径与查询参数
+      const { pathname } = url;
+      const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+      const isMutating = req.method === "POST" || req.method === "DELETE";
+      if (secFetchSite === "cross-site" && !trustedOrigin && (isMutating || pathname.startsWith("/api/"))) {
+        sendJson(res, 403, { error: "Forbidden cross-site request" });
+        return;
+      }
+
+      // 1.1. 优先响应已通过回环校验的 CORS 预检请求
       if (req.method === "OPTIONS") {
-        setCorsHeaders(res);
+        setCorsHeaders(res, trustedOrigin);
         res.writeHead(204);
         res.end();
         return;
       }
 
-      const url = new URL(req.url ?? "/", "http://127.0.0.1"); // 解析请求路径与查询参数
-      const { pathname } = url;
+      const replyJson = (statusCode: number, payload: unknown, extraHeaders?: Record<string, string>) =>
+        sendJson(res, statusCode, payload, extraHeaders, trustedOrigin);
 
       // 1.1.1. 配额重置记录读写接口（GET / POST / DELETE /api/resets）
       if (pathname === "/api/resets" && req.method === "GET") {
-        sendJson(res, 200, { resets: provider.getResets ? provider.getResets() : [] });
+        replyJson(200, { resets: provider.getResets ? provider.getResets() : [] });
         return;
       }
       if (pathname === "/api/resets" && req.method === "POST") {
         if (!provider.addReset) {
-          sendJson(res, 501, { error: "Resets store unavailable" });
+          replyJson(501, { error: "Resets store unavailable" });
           return;
         }
         try {
           const body = await readJsonBody(req);
           const timestamp = typeof body.timestamp === "string" ? body.timestamp : "";
-          const pool =
-            body.pool === "gemini" || body.pool === "claude" || body.pool === "all"
-              ? body.pool
-              : "all";
+          const rawPool = body.pool === undefined || body.pool === "" ? "all" : body.pool;
+          if (rawPool !== "gemini" && rawPool !== "claude" && rawPool !== "all") {
+            replyJson(400, { error: "无效的配额池类型（仅支持 all / gemini / claude）" });
+            return;
+          }
           const note = typeof body.note === "string" ? body.note : "";
-          const resets = provider.addReset({ timestamp, pool, note });
-          sendJson(res, 201, { resets });
+          const resets = provider.addReset({ timestamp, pool: rawPool, note });
+          replyJson(201, { resets });
         } catch (err) {
-          sendJson(res, 400, { error: err instanceof Error ? err.message : "参数不合法" });
+          replyJson(400, { error: err instanceof Error ? err.message : "参数不合法" });
         }
         return;
       }
       if (pathname.startsWith("/api/resets/") && req.method === "DELETE") {
         if (!provider.deleteReset) {
-          sendJson(res, 501, { error: "Resets store unavailable" });
+          replyJson(501, { error: "Resets store unavailable" });
           return;
         }
         const rawId = pathname.slice("/api/resets/".length);
         if (!rawId || rawId.includes("/")) {
-          sendJson(res, 404, { error: "Reset record not found" });
+          replyJson(404, { error: "Reset record not found" });
           return;
         }
-        const resets = provider.deleteReset(decodeURIComponent(rawId));
-        sendJson(res, 200, { resets });
+        try {
+          const resets = provider.deleteReset(decodeURIComponent(rawId));
+          replyJson(200, { resets });
+        } catch (err) {
+          replyJson(400, { error: err instanceof Error ? err.message : "删除重置记录失败" });
+        }
         return;
       }
 
       // 1.1.2. 周配额剩余%校准读写接口（GET / POST / DELETE /api/calibrations）
       if (pathname === "/api/calibrations" && req.method === "GET") {
-        sendJson(res, 200, {
+        if (provider.getCalibrationsState) {
+          const state = provider.getCalibrationsState();
+          if (!state.ok) {
+            replyJson(500, { error: state.error, corrupted: true });
+            return;
+          }
+          replyJson(200, { calibrations: state.calibrations, initialized: state.initialized });
+          return;
+        }
+        replyJson(200, {
           calibrations: provider.getCalibrations ? provider.getCalibrations() : {},
+          initialized: provider.isCalibrationsInitialized ? provider.isCalibrationsInitialized() : false,
         });
         return;
       }
       if (pathname === "/api/calibrations" && req.method === "POST") {
         if (!provider.setCalibration) {
-          sendJson(res, 501, { error: "Calibrations store unavailable" });
+          replyJson(501, { error: "Calibrations store unavailable" });
           return;
         }
         try {
-          const body = await readJsonBody(req);
+          const body = await readJsonBody(req, 256 * 1024);
+          if (body.batch !== undefined) {
+            if (!provider.migrateCalibrationsBatch) {
+              replyJson(501, { error: "Calibrations atomic batch migration unavailable" });
+              return;
+            }
+            if (!body.batch || typeof body.batch !== "object" || Array.isArray(body.batch)) {
+              replyJson(400, { error: "批量迁移数据必须为 JSON 对象" });
+              return;
+            }
+            const res = provider.migrateCalibrationsBatch(
+              body.batch as Record<
+                string,
+                { remainingPct: number; calibratedCostUsd: number; calibratedTokens: number; calibratedAt: string }
+              >
+            );
+            if (res.conflict) {
+              replyJson(409, { calibrations: res.calibrations, initialized: true, alreadyInitialized: true });
+              return;
+            }
+            replyJson(200, { calibrations: res.calibrations, initialized: true });
+            return;
+          }
           const key = typeof body.key === "string" ? body.key : "";
-          const calibrations = provider.setCalibration(key, {
-            remainingPct: Number(body.remainingPct),
-            calibratedCostUsd: Number(body.calibratedCostUsd),
-            calibratedTokens: Number(body.calibratedTokens),
-            calibratedAt:
-              typeof body.calibratedAt === "string" ? body.calibratedAt : new Date().toISOString(),
-          });
-          sendJson(res, 200, { calibrations });
+          const source = body.source === "auto" ? "auto" : "manual";
+          let calibratedAt: string;
+          if (body.calibratedAt === undefined) {
+            if (source === "auto") {
+              replyJson(400, { error: "自动采样写入必须提供有效的 calibratedAt 采样时间" });
+              return;
+            }
+            calibratedAt = new Date().toISOString();
+          } else if (typeof body.calibratedAt === "string" && body.calibratedAt.trim()) {
+            calibratedAt = body.calibratedAt;
+          } else {
+            replyJson(400, { error: "无效的 calibratedAt 时间格式" });
+            return;
+          }
+          const calibrations = provider.setCalibration(
+            key,
+            {
+              remainingPct: body.remainingPct as number,
+              calibratedCostUsd: body.calibratedCostUsd as number,
+              calibratedTokens: body.calibratedTokens as number,
+              calibratedAt,
+            },
+            { source }
+          );
+          replyJson(200, { calibrations, initialized: true });
         } catch (err) {
-          sendJson(res, 400, { error: err instanceof Error ? err.message : "参数不合法" });
+          replyJson(400, { error: err instanceof Error ? err.message : "参数不合法" });
         }
         return;
       }
       if (pathname === "/api/calibrations" && req.method === "DELETE") {
         if (!provider.deleteCalibration) {
-          sendJson(res, 501, { error: "Calibrations store unavailable" });
+          replyJson(501, { error: "Calibrations store unavailable" });
           return;
         }
-        const key = url.searchParams.get("key")?.trim() ?? "";
-        const calibrations = provider.deleteCalibration(key);
-        sendJson(res, 200, { calibrations });
+        try {
+          const key = url.searchParams.get("key")?.trim() ?? "";
+          const atParam = url.searchParams.get("at")?.trim();
+          const calibrations = provider.deleteCalibration(key, atParam || undefined);
+          replyJson(200, { calibrations });
+        } catch (err) {
+          replyJson(400, { error: err instanceof Error ? err.message : "删除周校准失败" });
+        }
         return;
       }
 
-      // 1.1.3. 本地仓库自更新检测与一键执行接口（GET / POST /api/update）
+      // 1.1.3. 本地仓库自更新检测与一键执行接口（GET / POST /api/update，死锁回收与互斥由 update.mjs 统一裁决）
+      const isLockHeldByAlive = (): boolean => {
+        if (!fs.existsSync(UPDATE_LOCK_PATH)) return false;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(UPDATE_LOCK_PATH, "utf8")) as { pid?: unknown };
+          const pid = Number(parsed?.pid);
+          if (!Number.isInteger(pid) || pid <= 0) return false;
+          process.kill(pid, 0);
+          return true;
+        } catch (err) {
+          return Boolean(err && typeof err === "object" && (err as { code?: string }).code === "EPERM");
+        }
+      };
       if (pathname === "/api/update" && req.method === "GET") {
         const force = url.searchParams.get("force") === "1";
         if (!force && updateCheckCache && Date.now() < updateCheckCache.expiresAt) {
-          sendJson(res, 200, { ...updateCheckCache.data, updating: updateInFlight });
+          replyJson(200, { ...updateCheckCache.data, updating: updateInFlight || isLockHeldByAlive() });
           return;
         }
         const data = await runUpdateScriptJson(["--check", "--json"], 15_000);
         updateCheckCache = { data, expiresAt: Date.now() + UPDATE_CHECK_TTL_MS };
-        sendJson(res, 200, { ...data, updating: updateInFlight });
+        replyJson(200, { ...data, updating: updateInFlight || isLockHeldByAlive() });
         return;
       }
       if (pathname === "/api/update" && req.method === "POST") {
         if (updateInFlight) {
-          sendJson(res, 409, { ok: false, updated: false, message: "正在更新中，请稍候" });
+          replyJson(409, { ok: false, updated: false, busy: true, message: "正在更新中，请稍候" });
           return;
         }
         updateInFlight = true;
@@ -462,7 +621,8 @@ export function createTelemetryHttpServer(
           const result = await runUpdateScriptJson(["--no-restart", "--json"], 180_000);
           updateCheckCache = null;
           const willRestart = Boolean(result.ok && result.updated && result.needRestart);
-          sendJson(res, result.ok ? 200 : 400, { ...result, restarting: willRestart });
+          const statusCode = result.busy ? 409 : result.ok ? 200 : 400;
+          replyJson(statusCode, { ...result, restarting: willRestart });
           if (willRestart && fs.existsSync(SERVICE_SCRIPT_PATH)) {
             setTimeout(() => {
               const child = spawn(process.execPath, [SERVICE_SCRIPT_PATH, "restart"], {
@@ -480,20 +640,19 @@ export function createTelemetryHttpServer(
       }
 
       if (req.method !== "GET") {
-        sendJson(res, 405, { error: "Method not allowed" });
+        replyJson(405, { error: "Method not allowed" });
         return;
       }
 
       // 1.2. 健康检查与汇总查询路由
       if (pathname === "/api/health") {
-        sendJson(res, 200, provider.getHealth());
+        replyJson(200, provider.getHealth());
         return;
       }
 
       if (pathname === "/api/summary") {
         const filters = parseSummaryQuery(url);
-        sendJson(
-          res,
+        replyJson(
           200,
           provider.getSummary(filters),
           buildId ? { "X-Hamiji-Build": buildId } : undefined
@@ -505,23 +664,23 @@ export function createTelemetryHttpServer(
       if (pathname.startsWith("/api/conversations/")) {
         const rawId = pathname.slice("/api/conversations/".length);
         if (!rawId || rawId.includes("/")) {
-          sendJson(res, 404, { error: "Conversation not found" });
+          replyJson(404, { error: "Conversation not found" });
           return;
         }
         const conversationId = decodeURIComponent(rawId);
         const detail = provider.getConversationDetail(conversationId);
         if (!detail) {
-          sendJson(res, 404, { error: "Conversation not found" });
+          replyJson(404, { error: "Conversation not found" });
           return;
         }
-        sendJson(res, 200, detail);
+        replyJson(200, detail);
         return;
       }
 
       // 1.4. JSON 与 UTF-8 BOM CSV 导出路由
       if (pathname === "/api/export.json") {
         const summary = provider.getSummary(parseSummaryQuery(url));
-        sendJson(res, 200, summary, {
+        replyJson(200, summary, {
           "Content-Disposition": 'attachment; filename="antigravity-tokens.json"',
         });
         return;
@@ -530,7 +689,7 @@ export function createTelemetryHttpServer(
       if (pathname === "/api/export.csv") {
         const summary = provider.getSummary(parseSummaryQuery(url));
         const csvPayload = serializeConversationsCsv(summary.conversations);
-        setCorsHeaders(res);
+        setCorsHeaders(res, trustedOrigin);
         res.writeHead(200, {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": 'attachment; filename="antigravity-tokens.csv"',
@@ -541,16 +700,16 @@ export function createTelemetryHttpServer(
 
       // 1.5. 未匹配的其他 /api/* 路径一律返回 404 JSON，避免误落入 SPA 回退
       if (pathname.startsWith("/api/")) {
-        sendJson(res, 404, { error: "API endpoint not found" });
+        replyJson(404, { error: "API endpoint not found" });
         return;
       }
 
       // 2. 非 API GET 请求交由静态目录托管或 SPA 回退处理
-      serveStaticOrFallback(req.url ?? "/", options?.staticDir, res);
+      serveStaticOrFallback(req.url ?? "/", options?.staticDir, res, trustedOrigin);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!res.headersSent) {
-        sendJson(res, 500, { error: message });
+        sendJson(res, 500, { error: message }, undefined, trustedOrigin);
       } else {
         res.end();
       }

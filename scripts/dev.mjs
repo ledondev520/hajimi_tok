@@ -17,7 +17,7 @@ function launchProcess(name, cmd, args) {
   // 0. 启动子进程并继承当前终端颜色与标准流
   const child = spawn(cmd, args, {
     stdio: "inherit",
-    env: { ...process.env, FORCE_COLOR: "1", COMPAT_PORT: "0" },
+    env: { ...process.env, FORCE_COLOR: "1", COMPAT_PORT: "0", AGY_DISABLE_AUTO_UPDATE: "1" },
   });
   children.push(child);
 

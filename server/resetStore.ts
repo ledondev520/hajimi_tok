@@ -103,11 +103,39 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
     }
   };
 
-  const readLocalRaw = (): StoredLocalResetEvent[] => {
+  const readLocalStrict = (): StoredLocalResetEvent[] => {
     if (!fs.existsSync(filePath)) return [];
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      return normalizeResetList(parsed, true);
+      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (err) {
+      throw new Error(
+        `本地重置记录文件已损坏或不可读，已阻止覆盖以保留原件 (${filePath}): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(`本地重置记录文件格式损坏（非数组），已阻止覆盖以保留原件 (${filePath})`);
+    }
+    for (let i = 0; i < parsed.length; i++) {
+      const item = parsed[i];
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`本地重置记录第 ${i + 1} 条已损坏，已阻止覆盖以保留原件 (${filePath})`);
+      }
+      const obj = item as Record<string, unknown>;
+      const tsMs = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp.trim()) : Number.NaN;
+      if (!Number.isFinite(tsMs) || tsMs <= 0) {
+        throw new Error(`本地重置记录第 ${i + 1} 条时间字段无效，已阻止覆盖以保留原件 (${filePath})`);
+      }
+      if (!VALID_POOLS.has(obj.pool as QuotaResetEvent["pool"])) {
+        throw new Error(`本地重置记录第 ${i + 1} 条配额池字段无效，已阻止覆盖以保留原件 (${filePath})`);
+      }
+    }
+    return normalizeResetList(parsed, true);
+  };
+
+  const readLocalSafe = (): StoredLocalResetEvent[] => {
+    try {
+      return readLocalStrict();
     } catch {
       return [];
     }
@@ -148,7 +176,7 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
   const writeLocalRaw = (list: StoredLocalResetEvent[]): QuotaResetEvent[] => {
     const normalized = normalizeResetList(list, true);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.tmp`;
+    const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf8");
     fs.renameSync(tmp, filePath);
     return mergeAll(normalized);
@@ -156,7 +184,7 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
 
   return {
     list(): QuotaResetEvent[] {
-      return mergeAll(readLocalRaw());
+      return mergeAll(readLocalSafe());
     },
     add(input: { timestamp: string; pool: "all" | "gemini" | "claude"; note?: string }): QuotaResetEvent[] {
       const tsMs = Date.parse(input.timestamp);
@@ -168,16 +196,16 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
       }
       const iso = new Date(tsMs).toISOString();
       const note = (input.note ?? "").trim().slice(0, 120);
-      const current = readLocalRaw().filter((r) => !(r.timestamp === iso && r.pool === input.pool));
+      const current = readLocalStrict().filter((r) => !(r.timestamp === iso && r.pool === input.pool));
       current.push({ id: crypto.randomUUID(), timestamp: iso, pool: input.pool, note });
       return writeLocalRaw(current);
     },
     remove(id: string): QuotaResetEvent[] {
       const target = id.trim();
-      if (!target) return mergeAll(readLocalRaw());
+      const localRaw = readLocalStrict();
+      if (!target) return mergeAll(localRaw);
       const shared = readShared();
       const sharedKeys = new Set(shared.map((s) => `${s.timestamp}|${s.pool}`));
-      const localRaw = readLocalRaw();
 
       const localHit = localRaw.find((r) => !r.dismissed && r.id === target);
       if (localHit) {
@@ -254,71 +282,224 @@ function normalizeCalibrationMap(raw: unknown): Record<string, WeeklyQuotaCalibr
 }
 
 /**
+ * 职责：严格校验单条周剩余%校准记录（禁止 null/非数字转 0%，禁止非法时间静默替换为当前时刻）。
+ */
+function validateCalibrationEntry(rawKey: string, item: unknown, contextLabel: string): {
+  key: string;
+  entry: WeeklyQuotaCalibration;
+} {
+  const key = rawKey.trim().slice(0, 160);
+  if (!key) throw new Error(`${contextLabel}：校准键不能为空`);
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new Error(`${contextLabel}：校准条目格式非法 (${key})`);
+  }
+  const obj = item as Record<string, unknown>;
+  if (
+    typeof obj.remainingPct !== "number" ||
+    !Number.isFinite(obj.remainingPct) ||
+    obj.remainingPct < 0 ||
+    obj.remainingPct >= 100
+  ) {
+    throw new Error(`${contextLabel}：周剩余百分比必须为 0 到 99.9 之间的数值 (${key})`);
+  }
+  if (
+    typeof obj.calibratedCostUsd !== "number" ||
+    !Number.isFinite(obj.calibratedCostUsd) ||
+    obj.calibratedCostUsd < 0
+  ) {
+    throw new Error(`${contextLabel}：校准基准成本必须为非负数值 (${key})`);
+  }
+  if (
+    typeof obj.calibratedTokens !== "number" ||
+    !Number.isFinite(obj.calibratedTokens) ||
+    obj.calibratedTokens < 0
+  ) {
+    throw new Error(`${contextLabel}：校准基准 Token 必须为非负数值 (${key})`);
+  }
+  const rawAt = typeof obj.calibratedAt === "string" ? obj.calibratedAt.trim() : "";
+  const atMs = rawAt ? Date.parse(rawAt) : Number.NaN;
+  if (!Number.isFinite(atMs) || atMs <= 0) {
+    throw new Error(`${contextLabel}：校准时间无效 (${key})`);
+  }
+  return {
+    key,
+    entry: {
+      remainingPct: obj.remainingPct,
+      calibratedCostUsd: obj.calibratedCostUsd,
+      calibratedTokens: obj.calibratedTokens,
+      calibratedAt: new Date(atMs).toISOString(),
+    },
+  };
+}
+
+const CALIBRATION_TOMBSTONE_KEY = "__deletedAt"; // calibrations.json 内保留的删除墓碑时间戳字典键
+
+/**
  * 职责：创建本地周剩余%校准快照存储实例，跨浏览器、跨端口持久保存每周满额反算基准。
- * 思路：容错读取 JSON，写入采用同目录临时文件 + rename 原子替换。
+ * 思路：1) 读写均严格校验数值类型与时间（阻断 null->0% 与伪造当前时间）；2) 单条写入按时间戳与删除墓碑保护较新校准及删除状态；3) 首次批量迁移整批预验且遇已初始化文件返回 conflict。
  * 参数：customPath — 可选文件路径。
- * 返回值：包含 list / set / remove 的存储对象。
+ * 返回值：包含 readState / list / isInitialized / set / migrateBatch / remove 的存储对象。
  */
 export function createCalibrationStore(customPath?: string) {
   const filePath = resolveCalibrationStorePath(customPath);
 
-  const readAll = (): Record<string, WeeklyQuotaCalibration> => {
-    if (!fs.existsSync(filePath)) return {};
+  const readDocStrict = (): {
+    entries: Record<string, WeeklyQuotaCalibration>;
+    deletedAt: Record<string, string>;
+  } => {
+    if (!fs.existsSync(filePath)) return { entries: {}, deletedAt: {} };
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      return normalizeCalibrationMap(parsed);
+      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (err) {
+      throw new Error(
+        `本地周校准文件已损坏或不可读，已阻止覆盖以保留原件 (${filePath}): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`本地周校准文件格式损坏（非 JSON 对象），已阻止覆盖以保留原件 (${filePath})`);
+    }
+    const entries: Record<string, WeeklyQuotaCalibration> = {};
+    const deletedAt: Record<string, string> = {};
+    for (const [rawKey, item] of Object.entries(parsed as Record<string, unknown>)) {
+      if (rawKey === CALIBRATION_TOMBSTONE_KEY) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          throw new Error(`本地周校准文件删除标记格式损坏，已阻止覆盖以保留原件 (${filePath})`);
+        }
+        for (const [dk, dv] of Object.entries(item as Record<string, unknown>)) {
+          const cleanDk = dk.trim().slice(0, 160);
+          const ms = typeof dv === "string" ? Date.parse(dv.trim()) : Number.NaN;
+          if (!cleanDk || !Number.isFinite(ms) || ms <= 0) {
+            throw new Error(`本地周校准文件删除时间戳无效 (${dk})，已阻止覆盖以保留原件 (${filePath})`);
+          }
+          deletedAt[cleanDk] = new Date(ms).toISOString();
+        }
+        continue;
+      }
+      const { key, entry } = validateCalibrationEntry(rawKey, item, `本地周校准文件含损坏条目 (${filePath})`);
+      entries[key] = entry;
+    }
+    return { entries, deletedAt };
+  };
+
+  const readEntriesSafe = (): Record<string, WeeklyQuotaCalibration> => {
+    try {
+      return readDocStrict().entries;
     } catch {
       return {};
     }
   };
 
-  const writeAll = (
-    map: Record<string, WeeklyQuotaCalibration>
+  const writeDoc = (
+    entries: Record<string, WeeklyQuotaCalibration>,
+    deletedAt: Record<string, string>
   ): Record<string, WeeklyQuotaCalibration> => {
-    const normalized = normalizeCalibrationMap(map);
+    const normalized = normalizeCalibrationMap(entries);
+    const payload: Record<string, unknown> = { ...normalized };
+    if (Object.keys(deletedAt).length > 0) {
+      payload[CALIBRATION_TOMBSTONE_KEY] = deletedAt;
+    }
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf8");
+    const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
     fs.renameSync(tmp, filePath);
     return normalized;
   };
 
   return {
+    isInitialized(): boolean {
+      return fs.existsSync(filePath);
+    },
+    readState():
+      | { ok: true; calibrations: Record<string, WeeklyQuotaCalibration>; initialized: boolean }
+      | { ok: false; error: string } {
+      const exists = fs.existsSync(filePath);
+      if (!exists) return { ok: true, calibrations: {}, initialized: false };
+      try {
+        return { ok: true, calibrations: readDocStrict().entries, initialized: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
     list(): Record<string, WeeklyQuotaCalibration> {
-      return readAll();
+      return readEntriesSafe();
     },
-    set(key: string, value: WeeklyQuotaCalibration): Record<string, WeeklyQuotaCalibration> {
+    set(
+      key: string,
+      value: WeeklyQuotaCalibration,
+      options?: { source?: "manual" | "auto" }
+    ): Record<string, WeeklyQuotaCalibration> {
+      if (key.trim() === CALIBRATION_TOMBSTONE_KEY) {
+        throw new Error("周校准键名不可使用保留字");
+      }
+      const { key: cleanKey, entry } = validateCalibrationEntry(key, value, "周校准参数非法");
+      const { entries, deletedAt } = readDocStrict();
+      const nextMs = Date.parse(entry.calibratedAt);
+      const existing = entries[cleanKey];
+      if (existing) {
+        const existingMs = Date.parse(existing.calibratedAt);
+        // 服务端按时间戳保护较新校准：旧采样/迟到请求绝不覆盖较新的手工或已保存校准
+        if (options?.source === "auto" ? existingMs >= nextMs : existingMs > nextMs) {
+          return entries;
+        }
+      }
+      const tombIso = deletedAt[cleanKey];
+      if (tombIso) {
+        const tombMs = Date.parse(tombIso);
+        // 服务端按删除墓碑时间戳保护已删除状态：删除前的旧采样/迟到写入绝不重建已删键
+        if (options?.source === "auto" ? tombMs >= nextMs : tombMs > nextMs) {
+          return entries;
+        }
+        delete deletedAt[cleanKey];
+      }
+      return writeDoc({ ...entries, [cleanKey]: entry }, deletedAt);
+    },
+    migrateBatch(entriesInput: Record<string, WeeklyQuotaCalibration>): {
+      conflict: boolean;
+      calibrations: Record<string, WeeklyQuotaCalibration>;
+    } {
+      // 1. 服务端已初始化时绝不重新写入旧批次，返回冲突态与权威服务端快照以保留其他窗口的删除操作
+      if (fs.existsSync(filePath)) {
+        return { conflict: true, calibrations: readDocStrict().entries };
+      }
+      const pairs = Object.entries(entriesInput);
+      if (pairs.length > 1000) {
+        throw new Error("单次迁移周校准条目数超出上限（最多 1000 条）");
+      }
+      // 2. 整批原子预校验：任一条目不合法即整体拒绝，不落盘、不标记初始化
+      const validated: Record<string, WeeklyQuotaCalibration> = {};
+      for (const [rawKey, value] of pairs) {
+        if (rawKey.trim() === CALIBRATION_TOMBSTONE_KEY) {
+          throw new Error("批量迁移条目键名不可使用保留字");
+        }
+        const { key, entry } = validateCalibrationEntry(rawKey, value, "批量迁移条目非法");
+        validated[key] = entry;
+      }
+      return { conflict: false, calibrations: writeDoc(validated, {}) };
+    },
+    remove(key: string, deletedAtIso?: string): Record<string, WeeklyQuotaCalibration> {
       const cleanKey = key.trim().slice(0, 160);
-      if (!cleanKey) throw new Error("校准键不能为空");
-      if (!Number.isFinite(value.remainingPct) || value.remainingPct < 0 || value.remainingPct >= 100) {
-        throw new Error("周剩余百分比必须在 0 到 99.9 之间");
+      const { entries, deletedAt } = readDocStrict();
+      if (!cleanKey || cleanKey === CALIBRATION_TOMBSTONE_KEY) return entries;
+      let delMs = Date.now();
+      if (deletedAtIso !== undefined) {
+        const parsedDel = Date.parse(deletedAtIso.trim());
+        if (!Number.isFinite(parsedDel) || parsedDel <= 0) {
+          throw new Error("无效的删除时间戳");
+        }
+        delMs = parsedDel;
       }
-      if (!Number.isFinite(value.calibratedCostUsd) || value.calibratedCostUsd < 0) {
-        throw new Error("校准基准成本非法");
+      const existing = entries[cleanKey];
+      if (existing && Date.parse(existing.calibratedAt) > delMs) {
+        // 迟到的旧删除请求晚于新写入版本，保留较新校准
+        return entries;
       }
-      if (!Number.isFinite(value.calibratedTokens) || value.calibratedTokens < 0) {
-        throw new Error("校准基准 Token 非法");
+      delete entries[cleanKey];
+      const prevTombMs = deletedAt[cleanKey] ? Date.parse(deletedAt[cleanKey]) : 0;
+      if (delMs >= prevTombMs) {
+        deletedAt[cleanKey] = new Date(delMs).toISOString();
       }
-      const atMs = Date.parse(value.calibratedAt || "");
-      const calibratedAt = Number.isFinite(atMs) && atMs > 0 ? new Date(atMs).toISOString() : new Date().toISOString();
-      const next = {
-        ...readAll(),
-        [cleanKey]: {
-          remainingPct: value.remainingPct,
-          calibratedCostUsd: value.calibratedCostUsd,
-          calibratedTokens: value.calibratedTokens,
-          calibratedAt,
-        },
-      };
-      return writeAll(next);
-    },
-    remove(key: string): Record<string, WeeklyQuotaCalibration> {
-      const cleanKey = key.trim();
-      if (!cleanKey) return readAll();
-      const next = readAll();
-      if (!(cleanKey in next)) return next;
-      delete next[cleanKey];
-      return writeAll(next);
+      return writeDoc(entries, deletedAt);
     },
   };
 }
@@ -330,7 +511,8 @@ export function createCalibrationStore(customPath?: string) {
  * 返回值：poolKey -> LivePoolQuotaSnapshot 映射。
  */
 export function readLiveQuotaSnapshots(
-  customPath?: string
+  customPath?: string,
+  nowMs = Date.now()
 ): Record<string, LivePoolQuotaSnapshot> {
   const filePath =
     customPath ||
@@ -343,7 +525,7 @@ export function readLiveQuotaSnapshots(
     };
     if (!parsed || typeof parsed.pools !== "object" || !parsed.pools) return {};
     const out: Record<string, LivePoolQuotaSnapshot> = {};
-    const cutoffMs = Date.now() - 7 * 86_400_000;
+    const cutoffMs = nowMs - 7 * 86_400_000;
     for (const [poolKey, item] of Object.entries(parsed.pools)) {
       if (!item || typeof item !== "object") continue;
       const pct = Number(item.remainingPct);

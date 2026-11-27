@@ -24,6 +24,8 @@ export interface CacheTtlObservation {
   kept: boolean; // 是否判定为缓存保活（hitRate >= 50%）
   expired: boolean; // 是否判定为缓存 TTL 失效（hitRate < 30%）
   timestamp: string; // 本步发生时间 ISO-8601
+  modelName?: string; // 本步模型名（用于原序判定后再按模型视图筛选）
+  modelId?: string; // 本步模型标识
 }
 
 const MIN_SAMPLE_GAP_MS = 30_000; // 纳入 TTL 衰减统计的最小间隔（30 秒，过滤连续工具调用噪声）
@@ -264,6 +266,8 @@ export function analyzeStepCacheTtl(
         kept,
         expired,
         timestamp: step.timestamp,
+        modelName: step.modelName,
+        modelId: step.modelId,
       });
       if (expired) {
         status = "expired";

@@ -202,6 +202,7 @@ export function App() {
   );
   const [cycle, setCycle] = useState<QuotaCycleMode>(resolveInitialCycle);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
+  const [appliedWorkspace, setAppliedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
   const [selectedModel, setSelectedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
   const [appliedModel, setAppliedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
   const [theme, setTheme] = useState<ThemeMode>(resolveInitialTheme);
@@ -262,6 +263,7 @@ export function App() {
           startTransition(() => {
             setSummary(cached);
             setAppliedModel(selectedModel);
+            setAppliedWorkspace(selectedWorkspace);
           });
         }
       }
@@ -292,8 +294,9 @@ export function App() {
               window.location.reload();
               return;
             }
+          } else {
+            buildIdRef.current = nextBuildId;
           }
-          buildIdRef.current = nextBuildId;
         }
         const data = (await res.json()) as DashboardSummaryPayload;
         if (reqSeq !== requestSeqRef.current) return;
@@ -305,6 +308,7 @@ export function App() {
         startTransition(() => {
           setSummary(data);
           setAppliedModel(selectedModel);
+          setAppliedWorkspace(selectedWorkspace);
         });
         setError(null);
       } catch (err) {
@@ -662,6 +666,11 @@ export function App() {
                   appliedModelShortcut.modelQuery
                     ? summary.liveQuota?.[appliedModelShortcut.modelQuery]
                     : undefined
+                }
+                isWorkspaceFiltered={
+                  Boolean(selectedWorkspace || appliedWorkspace) ||
+                  selectedModel !== appliedModel ||
+                  Boolean(summary.quotaWindow && summary.quotaWindow.mode !== cycle)
                 }
               />
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

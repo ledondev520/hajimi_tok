@@ -188,25 +188,46 @@ function projectConversationSteps(
   };
 }
 
+/** createTelemetryService 可选隔离与存储配置（解耦生产自定义数据目录与单测隔离） */
+export interface TelemetryServiceOptions {
+  isolated?: boolean; // 单测隔离模式：不读取宿主机默认 resets / calibrations / env 锚点 / live-quota
+  resetsPath?: string; // 可选自定义 resets.json 路径
+  calibrationsPath?: string; // 可选自定义 calibrations.json 路径
+  liveQuotaPath?: string; // 可选自定义 live-quota.json 路径
+  useEnvAnchors?: boolean; // 是否读取环境变量锚点（默认非隔离态启用）
+}
+
 /**
  * 职责：构建符合 TelemetryProvider 接口的聚合查询服务。
  * 思路：调用增量扫描器获取全量会话详情，提取下拉可选项后执行多条件筛选，一次遍历汇总全局 KPI、模型/项目拆解与时间桶。
- * 参数：customDataDir — 可选数据目录；customRates — 可选模型费率表。
+ * 参数：customDataDir — 可选数据目录；customRates — 可选模型费率表；resetsPathOrOptions — 可选配置对象或兼容旧签名的重置文件路径；customCalibrationsPath — 兼容旧签名的校准文件路径。
  * 返回值：TelemetryProvider 实例。
  */
 export function createTelemetryService(
   customDataDir?: string,
   customRates?: ModelPriceRate[],
-  customResetsPath?: string,
+  resetsPathOrOptions?: string | TelemetryServiceOptions,
   customCalibrationsPath?: string
 ): TelemetryProvider {
+  const serviceOpts: TelemetryServiceOptions =
+    typeof resetsPathOrOptions === "string"
+      ? { resetsPath: resetsPathOrOptions, calibrationsPath: customCalibrationsPath }
+      : {
+          ...(resetsPathOrOptions ?? {}),
+          ...(customCalibrationsPath && !resetsPathOrOptions?.calibrationsPath
+            ? { calibrationsPath: customCalibrationsPath }
+            : {}),
+        };
+  const isolated = Boolean(serviceOpts.isolated);
+  const useEnvAnchors = serviceOpts.useEnvAnchors ?? !isolated;
   const pricing = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效费率配置
   const scanner = createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
-  const resetStore = !customDataDir || customResetsPath ? createResetStore(customResetsPath) : null; // 本地重置事件存储（单测隔离时默认关闭）
+  const resetStore =
+    !isolated || serviceOpts.resetsPath ? createResetStore(serviceOpts.resetsPath) : null;
   const calibrationStore =
-    !customDataDir || customCalibrationsPath
-      ? createCalibrationStore(customCalibrationsPath)
-      : null; // 本地周剩余%校准快照存储（单测隔离时默认关闭）
+    !isolated || serviceOpts.calibrationsPath
+      ? createCalibrationStore(serviceOpts.calibrationsPath)
+      : null;
   const SUMMARY_CACHE_TTL_MS = 15_000; // 同一数据版本下聚合结果缓存有效期（毫秒）
   const SUMMARY_CACHE_MAX = 16; // 最多缓存的筛选组合数
   let cachedScanVersion = -1; // 当前聚合缓存对应的扫描数据版本号
@@ -264,7 +285,7 @@ export function createTelemetryService(
         cycleMode,
         options.days,
         nowMs,
-        !customDataDir,
+        useEnvAnchors,
         registeredResets
       );
 
@@ -322,7 +343,12 @@ export function createTelemetryService(
         return cur;
       };
 
-      const rawStepEntries: Array<{ rootConv: ConversationDetail; step: StepUsageRecord; tsMs: number }> = [];
+      const rawStepEntries: Array<{
+        conv: ConversationDetail;
+        rootConv: ConversationDetail;
+        step: StepUsageRecord;
+        tsMs: number;
+      }> = [];
       const todayKey = toLocalBucketKeys(nowMs).dayKey;
       const dayMap = new Map<string, UsageTimeBucket>();
       const hourMap = new Map<string, UsageTimeBucket>();
@@ -379,15 +405,26 @@ export function createTelemetryService(
         if (conv.lastModifiedAt > curWs.lastActiveAt) curWs.lastActiveAt = conv.lastModifiedAt;
         wsAgg.set(wk, curWs);
 
-        // 2.1.1. 计算当前会话实测缓存 TTL 摘要，并累加至所属项目与全局衰减分桶
-        if (conv.steps.length >= 2) {
-          const ttlRes = analyzeStepCacheTtl(conv.steps, false);
-          if (ttlRes.summary.sampleCount > 0) {
-            convTtlMap.set(conv.conversationId, ttlRes.summary);
+        // 2.1.1. 基于会话未过滤原始步序判定缓存 TTL（避免筛选单模型后把隔着模型切换的两步误判为连续），再按当前视图过滤观测样本
+        const rawConv = allById.get(conv.conversationId) ?? conv;
+        if (rawConv.steps.length >= 2) {
+          const ttlRes = analyzeStepCacheTtl(rawConv.steps, false);
+          const matchedObs = ttlRes.observations.filter((obs) => {
+            const mName = obs.modelName ?? "";
+            const mId = obs.modelId ?? "";
+            if (modelQuery && !matchesModelQuery(mName, mId, modelQuery)) return false;
+            if (stepTimeFilter) {
+              const ts = Date.parse(obs.timestamp);
+              if (Number.isNaN(ts) || !stepTimeFilter(mName, mId, ts)) return false;
+            }
+            return true;
+          });
+          if (matchedObs.length > 0) {
+            convTtlMap.set(conv.conversationId, aggregateCacheTtlObservations(matchedObs, false));
             const wsObs = wsTtlObsMap.get(wk) ?? [];
-            wsObs.push(...ttlRes.observations);
+            wsObs.push(...matchedObs);
             wsTtlObsMap.set(wk, wsObs);
-            allTtlObs.push(...ttlRes.observations);
+            allTtlObs.push(...matchedObs);
           }
         }
 
@@ -398,6 +435,7 @@ export function createTelemetryService(
           const parsedTs = Date.parse(s.timestamp);
           const safeTsMs = Number.isNaN(parsedTs) ? 0 : parsedTs;
           rawStepEntries.push({
+            conv,
             rootConv,
             step: s,
             tsMs: safeTsMs,
@@ -547,18 +585,18 @@ export function createTelemetryService(
           return ttl ? { ...stripped, cacheTtl: ttl } : stripped;
         });
 
-      // 3.1. 按时间升序生成逐次调用增量节点序列（精确计算全局与分模型累计曲线）
+      // 3.1. 按时间升序生成逐次调用增量节点序列（保留实际会话/子代理身份与所属主会话身份）
       rawStepEntries.sort((a, b) => {
         if (a.tsMs !== b.tsMs) return a.tsMs - b.tsMs;
-        if (a.rootConv.conversationId !== b.rootConv.conversationId) {
-          return a.rootConv.conversationId.localeCompare(b.rootConv.conversationId);
+        if (a.conv.conversationId !== b.conv.conversationId) {
+          return a.conv.conversationId.localeCompare(b.conv.conversationId);
         }
         return a.step.callIndex - b.step.callIndex;
       });
 
       let runningAllTokens = 0;
       const runningByFamily = new Map<string, number>();
-      const allCallNodes: CallNodePoint[] = rawStepEntries.map(({ rootConv, step }, idx) => {
+      const allCallNodes: CallNodePoint[] = rawStepEntries.map(({ conv, rootConv, step }, idx) => {
         const modelLabel = step.modelName || "Unknown Model";
         const familyKey = modelLabel.replace(/\s*\([^)]*\)\s*$/g, "").trim().toLowerCase();
         runningAllTokens += step.totalTokens;
@@ -570,8 +608,10 @@ export function createTelemetryService(
             : 0;
         return {
           seq: idx + 1,
-          conversationId: rootConv.conversationId,
-          conversationTitle: rootConv.title || `会话 ${rootConv.conversationId.slice(0, 8)}`,
+          conversationId: conv.conversationId,
+          conversationTitle: conv.title || `会话 ${conv.conversationId.slice(0, 8)}`,
+          rootConversationId: rootConv.conversationId,
+          rootConversationTitle: rootConv.title || `会话 ${rootConv.conversationId.slice(0, 8)}`,
           callIndex: step.callIndex,
           timestamp: step.timestamp,
           modelName: modelLabel,
@@ -589,7 +629,46 @@ export function createTelemetryService(
       });
       const callTimeline = allCallNodes.slice(-MAX_CALL_TIMELINE_NODES);
 
-      const liveQuota = !customDataDir ? readLiveQuotaSnapshots() : {};
+      // 3.2. 读取官方 statusLine 实时周剩余快照，并在服务端对齐“采样时刻的整池累计消耗”作为校准分母
+      const rawLiveQuota =
+        !isolated || serviceOpts.liveQuotaPath
+          ? readLiveQuotaSnapshots(serviceOpts.liveQuotaPath, nowMs)
+          : {};
+      const liveQuota: typeof rawLiveQuota = {};
+      for (const [poolKey, snap] of Object.entries(rawLiveQuota)) {
+        const liveMs = Date.parse(snap.updatedAt);
+        if (!Number.isFinite(liveMs) || liveMs <= 0) continue;
+        const poolWin = computeQuotaCycleWindow(
+          allDetails,
+          poolKey,
+          "7d",
+          undefined,
+          nowMs,
+          useEnvAnchors,
+          registeredResets
+        ).quotaWindow;
+        const winStartMs = poolWin.windowStart ? Date.parse(poolWin.windowStart) : 0;
+        const winEndMs = poolWin.windowEnd ? Date.parse(poolWin.windowEnd) : 0;
+        if (!poolWin.windowStart || winStartMs <= 0 || winEndMs <= winStartMs) continue;
+        if (liveMs < winStartMs || liveMs >= winEndMs) continue;
+        let poolCostUsdAtSample = 0;
+        let poolTokensAtSample = 0;
+        for (const c of allDetails) {
+          for (const st of c.steps) {
+            if (!matchesModelQuery(st.modelName, st.modelId, poolKey)) continue;
+            const stMs = Date.parse(st.timestamp);
+            if (!Number.isFinite(stMs) || stMs < winStartMs || stMs > liveMs) continue;
+            poolCostUsdAtSample += st.estimatedCostUsd;
+            poolTokensAtSample += st.totalTokens;
+          }
+        }
+        liveQuota[poolKey] = {
+          ...snap,
+          windowStart: poolWin.windowStart,
+          poolCostUsdAtSample,
+          poolTokensAtSample,
+        };
+      }
       const payload: DashboardSummaryPayload = {
         health,
         totals,
@@ -668,16 +747,33 @@ export function createTelemetryService(
       return calibrationStore ? calibrationStore.list() : {};
     },
 
-    /** 职责：写入或更新一条周剩余%校准快照。 */
-    setCalibration(key, value) {
-      if (!calibrationStore) throw new Error("当前测试上下文未启用周校准存储");
-      return calibrationStore.set(key, value);
+    /** 职责：严格读取周校准存储状态，文件损坏时明确返回错误而非折成已初始化空表。 */
+    getCalibrationsState() {
+      if (!calibrationStore) return { ok: true as const, calibrations: {}, initialized: false };
+      return calibrationStore.readState();
     },
 
-    /** 职责：删除一条周剩余%校准快照。 */
-    deleteCalibration(key) {
+    /** 职责：判断服务端周校准存储文件是否已初始化（用于阻止旧客户端回填复活已删除记录）。 */
+    isCalibrationsInitialized() {
+      return calibrationStore ? calibrationStore.isInitialized() : false;
+    },
+
+    /** 职责：写入或更新一条周剩余%校准快照（服务端按时间戳保护较新校准）。 */
+    setCalibration(key, value, options) {
       if (!calibrationStore) throw new Error("当前测试上下文未启用周校准存储");
-      return calibrationStore.remove(key);
+      return calibrationStore.set(key, value, options);
+    },
+
+    /** 职责：首次迁移时整批原子验证落盘；若服务端已初始化则返回 conflict 保留权威状态。 */
+    migrateCalibrationsBatch(entries) {
+      if (!calibrationStore) throw new Error("当前测试上下文未启用周校准存储");
+      return calibrationStore.migrateBatch(entries);
+    },
+
+    /** 职责：删除一条周剩余%校准快照（记录删除时间戳防旧采样复活，并拒绝早于当前值的迟到删除）。 */
+    deleteCalibration(key, deletedAt) {
+      if (!calibrationStore) throw new Error("当前测试上下文未启用周校准存储");
+      return calibrationStore.remove(key, deletedAt);
     },
   };
 }

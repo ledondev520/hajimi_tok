@@ -220,7 +220,7 @@ describe("AntiGravity Token Engine", () => {
       "utf8"
     );
 
-    const svc = createTelemetryService(root);
+    const svc = createTelemetryService(root, undefined, { isolated: true });
     const summary = svc.getSummary();
     expect(summary.totals.conversationCount).toBe(2);
     expect(summary.totals.subagentCount).toBe(1);
@@ -332,7 +332,7 @@ describe("AntiGravity Token Engine", () => {
       "utf8"
     );
 
-    const svc = createTelemetryService(root);
+    const svc = createTelemetryService(root, undefined, { isolated: true });
     const nowActive = Date.parse("2026-11-09T10:30:00Z"); // 处于第 2 个 5h 窗口（09:00~14:00）内
 
     const cur5h = svc.getSummary({ cycle: "5h", nowMs: nowActive });

@@ -26,7 +26,8 @@ interface SummaryDbRow {
 /** transcript.jsonl 中单条 PLANNER_RESPONSE 解析结构 */
 interface JsonlStepItem {
   stepIndex: number; timestamp: string; inputTokens: number; cacheReadTokens: number;
-  outputTokens: number; inferredModelName: string; toolNames: string[];
+  outputTokens: number; hasInputTokens: boolean; hasCacheReadTokens: boolean; hasOutputTokens: boolean;
+  inferredModelName: string; toolNames: string[];
 }
 
 /** 单会话增量缓存项 */
@@ -46,26 +47,118 @@ export function resolveDefaultDataDir(): string {
   return process.env.AGY_DATA_DIR || path.join(os.homedir(), ".gemini", "antigravity");
 }
 
+const SQLITE_RETRY_BUF = new Int32Array(new SharedArrayBuffer(4)); // 快照拷贝冲突短重试等待缓冲
+
+/** 读取文件代际签名（mtimeMs:size:ino），缺失返回空串 */
+function getSnapshotGenSig(filePath: string): string {
+  try {
+    const st = fs.statSync(filePath);
+    return `${st.mtimeMs}:${st.size}:${st.ino}`;
+  } catch {
+    return "";
+  }
+}
+
 /**
- * 职责：以只读方式安全打开 SQLite 数据库，锁受限时自动降级 immutable=1 模式。
- * 思路：先尝试标准 readOnly 并用 SELECT 1 校验句柄；若抛异常则关闭半开句柄并降级 URI ?immutable=1。
+ * 职责：将 SQLite 活跃 -wal 与主库在代际一致校验下复制至独立临时快照目录后再打开，严格保证源目录零新增/零写入且不漏读活跃 WAL 已提交行。
+ * 思路：1) 拷贝前后校验主库与 -wal 的 stat 代际（先拷 -wal 再拷主库），若期间发生 checkpoint 或写入则重取（最多 3 次，仍不稳定则抛错交由上层不缓存并下轮重试）；2) 存在活跃 WAL 时绝不降级至忽略 WAL 的 immutable=1；3) 包装 db.close 并返回 cleanup 回收临时目录。
  * 参数：dbPath — SQLite 文件绝对路径。
- * 返回值：包含 DatabaseSync 实例与读取模式的对象。
+ * 返回值：包含 DatabaseSync 实例、读取模式与 cleanup 回收函数的对象。
  */
-export function openSqliteSafe(dbPath: string): { db: DatabaseSync; mode: "wal-readonly" | "immutable-fallback" } {
-  // 0. 优先尝试标准只读模式（支持合并活跃 .db-wal）
+export function openSqliteSafe(
+  dbPath: string,
+): { db: DatabaseSync; mode: "wal-readonly" | "immutable-fallback"; cleanup: () => void } {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hamiji-ro-"));
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 忽略临时目录清理异常 */ }
+  };
+
+  const snapDb = path.join(tmpDir, path.basename(dbPath));
+  const snapWal = `${snapDb}-wal`;
+  const walSrc = `${dbPath}-wal`;
+  let hasWal = false;
+  let consistent = false;
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      hasWal = false;
+      try { fs.unlinkSync(snapWal); } catch { /* ignore */ }
+      try { fs.unlinkSync(snapDb); } catch { /* ignore */ }
+
+      const beforeDb = getSnapshotGenSig(dbPath);
+      const beforeWal = getSnapshotGenSig(walSrc);
+      if (!beforeDb) throw new Error(`SQLite 源文件不存在: ${dbPath}`);
+
+      if (beforeWal) {
+        const walSt = fs.statSync(walSrc);
+        if (walSt.size > 0) {
+          fs.copyFileSync(walSrc, snapWal);
+          try { fs.chmodSync(snapWal, 0o600); } catch { /* 忽略权限调整异常 */ }
+          hasWal = true;
+        }
+      }
+      fs.copyFileSync(dbPath, snapDb);
+      try { fs.chmodSync(snapDb, 0o600); } catch { /* 忽略权限调整异常 */ }
+
+      const afterDb = getSnapshotGenSig(dbPath);
+      const afterWal = getSnapshotGenSig(walSrc);
+      if (afterDb === beforeDb && afterWal === beforeWal) {
+        consistent = true;
+        break;
+      }
+      if (attempt < 2) Atomics.wait(SQLITE_RETRY_BUF, 0, 0, 15);
+    }
+    if (!consistent) {
+      throw new Error(`SQLite 快照拷贝期间发生并发写入或 checkpoint，放弃不一致副本: ${path.basename(dbPath)}`);
+    }
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+
+  const wrapClose = (db: DatabaseSync): DatabaseSync => {
+    const origClose = db.close.bind(db);
+    try {
+      db.close = () => {
+        try { origClose(); } finally { cleanup(); }
+      };
+    } catch { /* 宿主若冻结实例方法则由调用方 cleanup 兜底 */ }
+    return db;
+  };
+
+  // 0. 有活跃 WAL 时严格在隔离临时副本中重放 WAL，失败时直接抛错绝不降级为忽略 WAL 的 immutable=1
   let primaryDb: DatabaseSync | null = null;
   try {
-    primaryDb = new DatabaseSync(dbPath, { readOnly: true });
+    primaryDb = hasWal ? new DatabaseSync(snapDb) : new DatabaseSync(`file:${snapDb}?immutable=1`, { readOnly: true });
     primaryDb.prepare("SELECT 1").get();
-    return { db: primaryDb, mode: "wal-readonly" };
-  } catch {
+    return { db: wrapClose(primaryDb), mode: "wal-readonly", cleanup };
+  } catch (err) {
     try { primaryDb?.close(); } catch { /* 忽略半开句柄关闭异常 */ }
-    // 1. 回退至 immutable=1 快照模式
-    const fallbackDb = new DatabaseSync(`file:${dbPath}?immutable=1`, { readOnly: true });
-    fallbackDb.prepare("SELECT 1").get();
-    return { db: fallbackDb, mode: "immutable-fallback" };
+    if (hasWal) {
+      cleanup();
+      throw err;
+    }
+    try {
+      const fallbackDb = new DatabaseSync(`file:${snapDb}?immutable=1`, { readOnly: true });
+      fallbackDb.prepare("SELECT 1").get();
+      return { db: wrapClose(fallbackDb), mode: "immutable-fallback", cleanup };
+    } catch (fallbackErr) {
+      cleanup();
+      throw fallbackErr;
+    }
   }
+}
+
+/**
+ * 职责：安全获取文件修改时间戳，文件瞬态缺失或不可读时返回 0。
+ * 参数：filePath — 文件路径。
+ * 返回值：mtimeMs 或 0。
+ */
+function getFileMtimeMs(filePath: string): number {
+  try { return fs.statSync(filePath).mtimeMs; } catch { return 0; }
 }
 
 /**
@@ -84,17 +177,22 @@ function getFileSig(filePath: string): string {
  * 返回值：标准 ISO-8601 时间串。
  */
 function normalizeIsoTime(raw: unknown, fallbackIso: string): string {
-  // 0. 区分数值型时间戳与日期字符串
+  // 0. 区分数值型时间戳与日期字符串，严格校验有效毫秒界限避免越界抛 RangeError
+  const safeFromMs = (ms: number): string =>
+    Number.isFinite(ms) && ms > 0 && ms <= 8.64e15 ? new Date(ms).toISOString() : fallbackIso;
   if (raw === null || raw === undefined || raw === "") return fallbackIso;
   if (typeof raw === "number" || typeof raw === "bigint") {
     const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? new Date(n < 1e11 ? n * 1000 : n).toISOString() : fallbackIso;
+    return Number.isFinite(n) && n > 0 ? safeFromMs(n < 1e11 ? n * 1000 : n) : fallbackIso;
   }
   if (typeof raw === "string" && raw.trim()) {
     const s = raw.trim();
-    if (/^\d+(\.\d+)?$/.test(s)) return new Date(Number(s) < 1e11 ? Number(s) * 1000 : Number(s)).toISOString();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      return Number.isFinite(n) && n > 0 ? safeFromMs(n < 1e11 ? n * 1000 : n) : fallbackIso;
+    }
     const ms = Date.parse(s);
-    if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+    if (!Number.isNaN(ms)) return safeFromMs(ms);
   }
   return fallbackIso;
 }
@@ -176,11 +274,15 @@ function parseTranscriptJsonl(jsonlPath: string, fallbackIso: string) {
       } else if (obj.type === "PLANNER_RESPONSE") {
         const calls = Array.isArray(obj.tool_calls) ? obj.tool_calls : [];
         const toolNames = calls.map((t) => (t && typeof (t as { name?: unknown }).name === "string" ? (t as { name: string }).name : "")).filter(Boolean);
+        const hasInputTokens = obj.input_tokens !== undefined && obj.input_tokens !== null;
+        const hasCacheReadTokens = obj.cache_read_tokens !== undefined && obj.cache_read_tokens !== null;
+        const hasOutputTokens = obj.output_tokens !== undefined && obj.output_tokens !== null;
         steps.push({
           stepIndex, timestamp: ts || fallbackIso,
           inputTokens: Math.max(0, Number(obj.input_tokens ?? 0)),
           cacheReadTokens: Math.max(0, Number(obj.cache_read_tokens ?? 0)),
           outputTokens: Math.max(0, Number(obj.output_tokens ?? 0)),
+          hasInputTokens, hasCacheReadTokens, hasOutputTokens,
           inferredModelName: activeModelFromSettings, toolNames,
         });
       }
@@ -215,7 +317,7 @@ function mergeHybridSteps(dbMetas: ParsedGenMetadata[], jsonlSteps: JsonlStepIte
   // 0. 过滤全 0 Token 的取消/中断空元数据行，避免错配 JSONL 步号或以最新时间漂移至图表尾部形成伪 0% 跌零
   const activeDbMetas = dbMetas.filter((m) => m.inputTokens + m.cacheReadTokens + m.outputTokens > 0);
 
-  // 0.1. 双轮配对索引（1: 精确步号关联；2: 顺序 callIndex 关联）
+  // 0.1. 双轮配对索引（1: 精确步号关联；2: 仅对缺失 lastStepIndex 的 DB 行按顺序回退，绝不合并冲突步号）
   const usedDb = new Set<number>();
   const jsonlToDb = new Map<number, number>();
   for (let j = 0; j < jsonlSteps.length; j++) {
@@ -225,9 +327,11 @@ function mergeHybridSteps(dbMetas: ParsedGenMetadata[], jsonlSteps: JsonlStepIte
   let cursor = 0;
   for (let j = 0; j < jsonlSteps.length; j++) {
     if (jsonlToDb.has(j)) continue;
-    if (j < activeDbMetas.length && !usedDb.has(j)) { usedDb.add(j); jsonlToDb.set(j, j); continue; }
-    while (cursor < activeDbMetas.length && usedDb.has(cursor)) cursor++;
-    if (cursor < activeDbMetas.length && activeDbMetas[cursor].lastStepIndex === null) { usedDb.add(cursor); jsonlToDb.set(j, cursor++); }
+    if (j < activeDbMetas.length && !usedDb.has(j) && activeDbMetas[j].lastStepIndex === null) {
+      usedDb.add(j); jsonlToDb.set(j, j); continue;
+    }
+    while (cursor < activeDbMetas.length && (usedDb.has(cursor) || activeDbMetas[cursor].lastStepIndex !== null)) cursor++;
+    if (cursor < activeDbMetas.length) { usedDb.add(cursor); jsonlToDb.set(j, cursor++); }
   }
 
   // 1. 生成 hybrid 与尾部实时 jsonl 步骤
@@ -241,11 +345,13 @@ function mergeHybridSteps(dbMetas: ParsedGenMetadata[], jsonlSteps: JsonlStepIte
       const modelName = dm.modelName || js.inferredModelName || dm.modelId || lastModelName || "Unknown Model";
       if (modelName !== "Unknown Model") lastModelName = modelName;
       if (dm.modelId) lastModelId = dm.modelId;
-      const outputTokens = js.outputTokens || dm.outputTokens;
+      const inputTokens = js.hasInputTokens ? js.inputTokens : dm.inputTokens;
+      const cacheReadTokens = js.hasCacheReadTokens ? js.cacheReadTokens : dm.cacheReadTokens;
+      const outputTokens = js.hasOutputTokens ? js.outputTokens : dm.outputTokens;
       const responseTokens = dm.responseTokens > 0 || dm.thinkingTokens > 0 ? dm.responseTokens : outputTokens;
       steps.push(buildStepRecord({
         stepIndex: js.stepIndex, timestamp: js.timestamp || fallbackTime, modelId, modelName,
-        inputTokens: js.inputTokens || dm.inputTokens, cacheReadTokens: js.cacheReadTokens || dm.cacheReadTokens,
+        inputTokens, cacheReadTokens,
         outputTokens, thinkingTokens: dm.thinkingTokens, responseTokens, contextUsed: dm.contextUsed,
         contextLimit: dm.contextLimit, latencyMs: dm.latencyMs, ttftMs: dm.ttftMs, toolNames: js.toolNames, dataSource: "hybrid",
       }, rates));
@@ -345,7 +451,7 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
           summaryDbAvailable = true;
           for (const r of rows) if (r.conversation_id) summaryMap.set(r.conversation_id, r);
         } catch (e) { warnings.push(`读取 conversation_summaries.db 失败: ${(e as Error).message}`); }
-        finally { try { opened?.db.close(); } catch { /* ignore */ } }
+        finally { try { opened?.db.close(); } catch { /* ignore */ } opened?.cleanup(); }
       }
 
       // 2. 收集会话 ID 并集
@@ -365,19 +471,28 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
         }
       }
 
-      // 3. 逐会话增量扫描
+      // 3. 逐会话增量扫描（单会话读取异常隔离且不缓存失败快照，恢复后下次自动重试）
       const conversations: ConversationDetail[] = [];
+      let hadAnyReadError = false;
       for (const id of allIds) {
         const dbPath = path.join(convDir, `${id}.db`), jsonlPath = path.join(brainDir, id, ".system_generated", "logs", "transcript.jsonl");
         const pbtxtPath = path.join(dataDir, "annotations", `${id}.pbtxt`), sRow = summaryMap.get(id);
         const fp = `${getFileSig(dbPath)}#${getFileSig(`${dbPath}-wal`)}#${getFileSig(jsonlPath)}#${getFileSig(pbtxtPath)}#${sRow ? `${sRow.title ?? ""}|${sRow.step_count ?? 0}|${sRow.last_modified_time ?? ""}|${sRow.workspace_uris ?? ""}|${sRow.status ?? ""}|${sRow.parent_conversation_id ?? ""}` : ""}`;
         const hit = cache.get(id);
-        if (hit && hit.fingerprint === fp) { trackMode(hit.readMode); conversations.push(hit.detail); continue; }
+        if (!forceRefresh && hit && hit.fingerprint === fp) { trackMode(hit.readMode); conversations.push(hit.detail); continue; }
         changed = true;
 
-        const latestMtime = Math.max(fs.existsSync(jsonlPath) ? fs.statSync(jsonlPath).mtimeMs : 0, fs.existsSync(dbPath) ? fs.statSync(dbPath).mtimeMs : 0);
+        let hadConvReadError = false;
+        const latestMtime = Math.max(getFileMtimeMs(jsonlPath), getFileMtimeMs(dbPath));
         const fallbackIso = normalizeIsoTime(sRow?.last_modified_time, new Date(latestMtime > 0 ? latestMtime : Date.now()).toISOString());
-        const pbtxt = parsePbtxtAnnotation(pbtxtPath), jsonl = parseTranscriptJsonl(jsonlPath, fallbackIso);
+        const pbtxt = parsePbtxtAnnotation(pbtxtPath);
+        let jsonl = { steps: [] as JsonlStepItem[], firstPromptPreview: "", activeModelFromSettings: "", maxStepIndex: -1, earliestAt: "", latestAt: "" };
+        try {
+          jsonl = parseTranscriptJsonl(jsonlPath, fallbackIso);
+        } catch (e) {
+          hadConvReadError = true;
+          warnings.push(`读取会话轨迹 ${id}/transcript.jsonl 失败: ${(e as Error).message}`);
+        }
         const dbMetas: ParsedGenMetadata[] = [];
         let convMode: "wal-readonly" | "immutable-fallback" | "none" = "none";
         if (fs.existsSync(dbPath)) {
@@ -386,8 +501,11 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
             opened = openSqliteSafe(dbPath); convMode = opened.mode; trackMode(opened.mode);
             const rows = opened.db.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").all() as Array<{ idx: number; data: Uint8Array }>;
             for (const r of rows) if (r.data instanceof Uint8Array) { const d = decodeGenMetadata(r.data); if (d) dbMetas.push(d); }
-          } catch (e) { warnings.push(`读取会话库 ${id}.db 失败: ${(e as Error).message}`); }
-          finally { try { opened?.db.close(); } catch { /* ignore */ } }
+          } catch (e) {
+            hadConvReadError = true;
+            warnings.push(`读取会话库 ${id}.db 失败: ${(e as Error).message}`);
+          }
+          finally { try { opened?.db.close(); } catch { /* ignore */ } opened?.cleanup(); }
         }
 
         const steps = mergeHybridSteps(dbMetas, jsonl.steps, fallbackIso, rates), ws = parseWorkspaceUris(sRow?.workspace_uris);
@@ -420,7 +538,12 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
           cacheHitRate: promptSum > 0 ? cacheReadTokens / promptSum : 0, peakContextUsed, latestContextUsed, contextLimit,
           totalLatencyMs, estimatedCostUsd, cacheSavedUsd, subagentCount: 0, steps, toolUsageCounts,
         };
-        cache.set(id, { fingerprint: fp, detail, readMode: convMode });
+        if (hadConvReadError) {
+          hadAnyReadError = true;
+          cache.delete(id);
+        } else {
+          cache.set(id, { fingerprint: fp, detail, readMode: convMode });
+        }
         conversations.push(detail);
       }
 
@@ -459,7 +582,7 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
       for (const c of conversations) c.subagentCount = childCounts.get(c.conversationId) ?? 0;
 
       if (changed) scanVersion++;
-      lastScanAt = Date.now();
+      lastScanAt = hadAnyReadError ? 0 : Date.now();
       lastSnapshot = {
         conversations,
         health: {

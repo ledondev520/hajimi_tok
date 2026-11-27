@@ -19,13 +19,40 @@ const STATIC_DIR = path.resolve(REPO_ROOT, "dist"); // 生产构建前端产物�
 const UPDATE_SCRIPT = path.join(REPO_ROOT, "scripts", "update.mjs"); // 自更新脚本路径
 const SERVICE_SCRIPT = path.join(REPO_ROOT, "scripts", "service.mjs"); // 常驻重启脚本路径
 const AUTO_UPDATE_INTERVAL_MS = 10 * 60_000; // 后台静默自动检查更新周期（10 分钟）
+const IS_CANONICAL_PROD_INSTANCE =
+  process.env.AGY_DISABLE_AUTO_UPDATE !== "1" && HOST === "127.0.0.1" && PORT === 4318; // 正式常驻生产主实例判定（自更新循环与重启确认共享同一口径）
+
+/**
+ * 职责：在正式常驻生产主实例成功监听后，委托 update.mjs 在跨进程锁保护下确认已完成构建的重启生效；若锁短暂忙碌则短延迟重试。
+ */
+function confirmAppliedUpdateState(attempt = 0): void {
+  if (!IS_CANONICAL_PROD_INSTANCE || !fs.existsSync(UPDATE_SCRIPT)) {
+    return;
+  }
+  execFile(
+    process.execPath,
+    [UPDATE_SCRIPT, "--confirm-applied", "--json"],
+    { cwd: REPO_ROOT, timeout: 10_000, maxBuffer: 256 * 1024 },
+    (_err, stdout) => {
+      try {
+        const res = JSON.parse((stdout || "").trim()) as { busy?: boolean };
+        if (res.busy && attempt < 5) {
+          const t = setTimeout(() => confirmAppliedUpdateState(attempt + 1), 500);
+          t.unref();
+        }
+      } catch {
+        /* 静默忽略非 JSON 输出 */
+      }
+    }
+  );
+}
 
 /**
  * 职责：启动后台静默自更新循环（启动 15 秒后首检，之后每 10 分钟检查一次，工作区干净且落后远端时自动拉取构建并重启）。
- * 思路：仅在非 dev 生产常驻模式下运行；有未提交改动时 update.mjs 自动跳过，绝不覆盖本地开发改动。
+ * 思路：仅在正式常驻生产主实例下运行；有未提交改动时 update.mjs 自动跳过，绝不覆盖本地开发改动。
  */
 function startSilentAutoUpdateLoop(): () => void {
-  if (process.env.AGY_DISABLE_AUTO_UPDATE === "1" || !fs.existsSync(UPDATE_SCRIPT)) {
+  if (!IS_CANONICAL_PROD_INSTANCE || !fs.existsSync(UPDATE_SCRIPT)) {
     return () => undefined;
   }
   let running = false;
@@ -104,6 +131,7 @@ function bootstrapServer(): void {
   const primary = makeServer();
   servers.push(primary);
   primary.listen(PORT, HOST, () => {
+    confirmAppliedUpdateState();
     const health = provider.getHealth();
     console.log(`[AntiGravity Token Radar] Local server listening at http://${HOST}:${PORT} (and http://localhost:${PORT})`);
     console.log(`[AntiGravity Token Radar] Data source: ${health.dataDir} (convs=${health.conversationDbCount}, transcripts=${health.transcriptCount})`);

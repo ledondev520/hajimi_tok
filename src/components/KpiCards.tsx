@@ -47,6 +47,7 @@ export interface KpiCardsProps {
   activePoolKey?: string; // 当前快捷选中的模型/配额池键（用于独立持久化周配额校准）
   quotaWindow?: QuotaCycleInfo; // 当前配额池的 5h/7d 周期窗口摘要
   liveQuota?: LivePoolQuotaSnapshot; // 可选：由 agy 官方 statusLine 桥接同步的实时官方周剩余
+  isWorkspaceFiltered?: boolean; // 是否处于单一工作区筛选视图（禁止写回整池周校准）
 }
 
 /**
@@ -63,12 +64,19 @@ export function KpiCards({
   activePoolKey = "",
   quotaWindow,
   liveQuota,
+  isWorkspaceFiltered = false,
 }: KpiCardsProps) {
-  // 0. 周配额剩余百分比校准态（优先同步本机 ~/.hamiji-sta/calibrations.json，支持同周期锚点微调自动承接）
+  // 0. 周配额剩余百分比校准态（仅「当前 7d + 整池未筛工作区」允许写入，历史回看与单项目视图严格只读防污染）
   const isWeeklyPoolView = Boolean(
     activePoolKey &&
+      !isWorkspaceFiltered &&
       quotaWindow?.windowStart &&
       (quotaWindow.mode === "7d" || quotaWindow.mode.startsWith("window:"))
+  );
+  const [calibrationsSynced, setCalibrationsSynced] = useState<boolean>(false);
+  const [calibrationSyncError, setCalibrationSyncError] = useState<string>("");
+  const canWriteWeeklyCalibration = Boolean(
+    calibrationsSynced && isWeeklyPoolView && quotaWindow?.mode === "7d"
   );
   const calibrationKey = isWeeklyPoolView
     ? `${activePoolKey}:${quotaWindow!.windowStart}`
@@ -92,88 +100,122 @@ export function KpiCards({
   const [draftPct, setDraftPct] = useState<string>(() =>
     activeCalibration ? String(activeCalibration.remainingPct) : ""
   );
+  const userTouchedKeysRef = useRef<Set<string>>(new Set());
+  const keyMutationSeqRef = useRef<Map<string, number>>(new Map()); // 按校准键单调递增序号，丢弃过期异步响应
+  const deletedAtByKeyRef = useRef<Map<string, number>>(new Map()); // 客户端同键删除时间戳，阻止防抖窗口内旧采样抢占删除
   const isUserEditingRef = useRef(false);
   const prevCalibrationKeyRef = useRef(calibrationKey);
   const syncTimerRef = useRef<number | null>(null);
   const appliedLiveAtRef = useRef<string>("");
 
-  // 0.0.1. 若本机装有 agy CLI 并通过官方 statusLine 写入更新的周剩余快照，自动回填至校准表并落盘
-  useEffect(() => {
-    if (!isWeeklyPoolView || !calibrationKey || !liveQuota) return;
-    if (liveQuota.remainingPct < 0 || liveQuota.remainingPct >= 100) return;
-    if (totals.totalTokens <= 0) return;
-    const liveMs = Date.parse(liveQuota.updatedAt);
-    const startMs = quotaWindow?.windowStart ? Date.parse(quotaWindow.windowStart) : 0;
-    if (!Number.isFinite(liveMs) || (startMs > 0 && liveMs < startMs)) return;
-    const liveSig = `${calibrationKey}|${liveQuota.updatedAt}|${liveQuota.remainingPct}`;
-    if (appliedLiveAtRef.current === liveSig) return;
-    const curAtMs = activeCalibration ? Date.parse(activeCalibration.calibratedAt || "") : 0;
-    if (Number.isFinite(curAtMs) && curAtMs >= liveMs) {
-      appliedLiveAtRef.current = liveSig;
-      return;
-    }
-    appliedLiveAtRef.current = liveSig;
-    const entry: WeeklyQuotaCalibration = {
-      remainingPct: liveQuota.remainingPct,
-      calibratedCostUsd: totals.estimatedCostUsd,
-      calibratedTokens: totals.totalTokens,
-      calibratedAt: liveQuota.updatedAt,
-    };
+  const bumpKeySeq = (k: string): number => {
+    const next = (keyMutationSeqRef.current.get(k) ?? 0) + 1;
+    keyMutationSeqRef.current.set(k, next);
+    return next;
+  };
+  const syncAuthoritativeKey = (
+    reqKey: string,
+    reqSeq: number | undefined,
+    payload: { calibrations?: Record<string, WeeklyQuotaCalibration> } | null
+  ) => {
+    if (!payload?.calibrations || keyMutationSeqRef.current.get(reqKey) !== reqSeq) return;
+    const authoritative = payload.calibrations[reqKey];
     setCalibrations((prev) => {
-      const next = { ...prev, [calibrationKey]: entry };
+      const next = { ...prev };
+      if (authoritative) next[reqKey] = authoritative;
+      else delete next[reqKey];
       writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
       return next;
     });
-    void fetch("/api/calibrations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: calibrationKey, ...entry }),
-    }).catch(() => undefined);
-  }, [
-    isWeeklyPoolView,
-    calibrationKey,
-    liveQuota,
-    quotaWindow?.windowStart,
-    totals.estimatedCostUsd,
-    totals.totalTokens,
-    activeCalibration,
-  ]);
+  };
 
-  // 0.0. 挂载时拉取服务端持久化校准表，并将浏览器历史 localStorage 校准一次性回填至服务端
+  // 0.0. 挂载时以服务端 initialized 为唯一权威：未初始化时忽略历史前端标志并整批原子迁移，确认成功或 409 已初始化后再开放写入
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/calibrations")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { calibrations?: Record<string, WeeklyQuotaCalibration> } | null) => {
+    (async () => {
+      try {
+        const res = await fetch("/api/calibrations");
+        if (!res.ok) {
+          if (!cancelled) {
+            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
+            setCalibrationSyncError(errJson?.error || "周校准服务读取异常，已保留本地缓存");
+          }
+          return;
+        }
+        const data = (await res.json()) as {
+          calibrations?: Record<string, WeeklyQuotaCalibration>;
+          initialized?: boolean;
+        } | null;
         if (cancelled || !data || !data.calibrations) return;
         const remote = data.calibrations;
+
+        if (data.initialized) {
+          setCalibrations((prev) => {
+            const next = { ...remote };
+            for (const k of userTouchedKeysRef.current) {
+              if (k in prev) next[k] = prev[k];
+              else delete next[k];
+            }
+            writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
+            return next;
+          });
+          setCalibrationSyncError("");
+          setCalibrationsSynced(true);
+          return;
+        }
+
         const local = readStoredJson<Record<string, WeeklyQuotaCalibration>>(
           WEEKLY_CALIBRATION_STORAGE_KEY,
           {}
         );
-        const merged: Record<string, WeeklyQuotaCalibration> = { ...remote };
-        const toBackfill: Array<[string, WeeklyQuotaCalibration]> = [];
-        for (const [k, localVal] of Object.entries(local)) {
-          const remoteVal = remote[k];
-          if (
-            !remoteVal ||
-            Date.parse(localVal.calibratedAt || "") > Date.parse(remoteVal.calibratedAt || "")
-          ) {
-            merged[k] = localVal;
-            toBackfill.push([k, localVal]);
+        if (Object.keys(local).length === 0) {
+          setCalibrations(remote);
+          writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, remote);
+          setCalibrationSyncError("");
+          setCalibrationsSynced(true);
+          return;
+        }
+
+        // 服务端未初始化且本地有历史：整批原子提交；若遇 409 表示另一窗口已完成初始化，直接采纳服务端权威状态
+        const postRes = await fetch("/api/calibrations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ batch: local }),
+        });
+        if (cancelled) return;
+        if (postRes.status === 409) {
+          const conflictPayload = (await postRes.json().catch(() => null)) as {
+            calibrations?: Record<string, WeeklyQuotaCalibration>;
+          } | null;
+          if (!cancelled && conflictPayload?.calibrations) {
+            setCalibrations(conflictPayload.calibrations);
+            writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, conflictPayload.calibrations);
+            setCalibrationSyncError("");
+            setCalibrationsSynced(true);
           }
+          return;
         }
-        setCalibrations(merged);
-        writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, merged);
-        for (const [k, val] of toBackfill) {
-          void fetch("/api/calibrations", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ key: k, ...val }),
-          }).catch(() => undefined);
+        if (!postRes.ok) {
+          const errJson = (await postRes.json().catch(() => null)) as { error?: string } | null;
+          if (!cancelled) {
+            setCalibrationSyncError(errJson?.error || "历史校准迁移失败，已保留本地副本");
+          }
+          return;
         }
-      })
-      .catch(() => undefined);
+        const savedPayload = (await postRes.json()) as {
+          calibrations?: Record<string, WeeklyQuotaCalibration>;
+        };
+        if (cancelled || !savedPayload?.calibrations) return;
+        setCalibrations(savedPayload.calibrations);
+        writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, savedPayload.calibrations);
+        setCalibrationSyncError("");
+        setCalibrationsSynced(true);
+      } catch {
+        if (!cancelled) {
+          setCalibrationSyncError("周校准同步失败，已保留本地副本");
+        }
+      }
+    })();
     return () => {
       cancelled = true;
       if (syncTimerRef.current !== null) {
@@ -181,6 +223,54 @@ export function KpiCards({
       }
     };
   }, []);
+
+  // 0.0.1. 仅在服务端完成初始化同步 + 当前 7d + 整池未筛工作区视图下，才将官方 statusLine 实时周剩余按采样时刻整池消耗回填
+  useEffect(() => {
+    if (!calibrationsSynced || !canWriteWeeklyCalibration || !calibrationKey || !liveQuota) return;
+    if (liveQuota.remainingPct < 0 || liveQuota.remainingPct >= 100) return;
+    if (liveQuota.windowStart && liveQuota.windowStart !== quotaWindow?.windowStart) return;
+    const liveMs = Date.parse(liveQuota.updatedAt);
+    const startMs = quotaWindow?.windowStart ? Date.parse(quotaWindow.windowStart) : 0;
+    const endMs = quotaWindow?.windowEnd ? Date.parse(quotaWindow.windowEnd) : 0;
+    if (!Number.isFinite(liveMs) || (startMs > 0 && liveMs < startMs) || (endMs > 0 && liveMs >= endMs)) {
+      return;
+    }
+    const sampleCostUsd =
+      typeof liveQuota.poolCostUsdAtSample === "number" && liveQuota.poolCostUsdAtSample >= 0
+        ? liveQuota.poolCostUsdAtSample
+        : totals.estimatedCostUsd;
+    const sampleTokens =
+      typeof liveQuota.poolTokensAtSample === "number" && liveQuota.poolTokensAtSample >= 0
+        ? liveQuota.poolTokensAtSample
+        : totals.totalTokens;
+    if (sampleTokens <= 0) return;
+    const liveSig = `${calibrationKey}|${liveQuota.updatedAt}|${liveQuota.remainingPct}|${sampleTokens}`;
+    if (appliedLiveAtRef.current === liveSig) return;
+    const deletedMs = deletedAtByKeyRef.current.get(calibrationKey) ?? 0;
+    const activeAtMs = activeCalibration ? Date.parse(activeCalibration.calibratedAt || "") : 0;
+    const curAtMs = Math.max(Number.isFinite(activeAtMs) ? activeAtMs : 0, deletedMs);
+    if (curAtMs >= liveMs) {
+      appliedLiveAtRef.current = liveSig;
+      return;
+    }
+    appliedLiveAtRef.current = liveSig;
+    const reqKey = calibrationKey;
+    const reqSeq = bumpKeySeq(reqKey);
+    const entry: WeeklyQuotaCalibration = {
+      remainingPct: liveQuota.remainingPct,
+      calibratedCostUsd: sampleCostUsd,
+      calibratedTokens: sampleTokens,
+      calibratedAt: liveQuota.updatedAt,
+    };
+    void fetch("/api/calibrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: reqKey, source: "auto", ...entry }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => syncAuthoritativeKey(reqKey, reqSeq, payload))
+      .catch(() => undefined);
+  }, [calibrationsSynced, canWriteWeeklyCalibration, calibrationKey, liveQuota, quotaWindow?.windowStart, quotaWindow?.windowEnd, totals.estimatedCostUsd, totals.totalTokens, activeCalibration]);
 
   useEffect(() => {
     const keyChanged = prevCalibrationKeyRef.current !== calibrationKey;
@@ -210,12 +300,10 @@ export function KpiCards({
    * 参数：raw — 输入框文本（0 ~ 99 或空串）。
    */
   const handleRemainingPctChange = (raw: string) => {
+    if (!canWriteWeeklyCalibration || !calibrationKey) return;
     isUserEditingRef.current = true;
+    userTouchedKeysRef.current.add(calibrationKey);
     setDraftPct(raw);
-    if (!calibrationKey) {
-      isUserEditingRef.current = false;
-      return;
-    }
     if (syncTimerRef.current !== null) {
       window.clearTimeout(syncTimerRef.current);
       syncTimerRef.current = null;
@@ -225,6 +313,13 @@ export function KpiCards({
       const keysToRemove = Array.from(
         new Set([calibrationKey, matchedCalibration?.key].filter((k): k is string => Boolean(k)))
       );
+      const delSeqMap = new Map<string, number>();
+      const deletedAtMs = Date.now();
+      const deletedAtIso = new Date(deletedAtMs).toISOString();
+      for (const k of keysToRemove) {
+        delSeqMap.set(k, bumpKeySeq(k));
+        deletedAtByKeyRef.current.set(k, deletedAtMs);
+      }
       setCalibrations((prev) => {
         const next = { ...prev };
         let changed = false;
@@ -241,15 +336,20 @@ export function KpiCards({
       syncTimerRef.current = window.setTimeout(() => {
         isUserEditingRef.current = false;
         for (const k of keysToRemove) {
-          void fetch(`/api/calibrations?key=${encodeURIComponent(k)}`, {
-            method: "DELETE",
-          }).catch(() => undefined);
+          const reqSeq = delSeqMap.get(k);
+          void fetch(`/api/calibrations?key=${encodeURIComponent(k)}&at=${encodeURIComponent(deletedAtIso)}`, { method: "DELETE" })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((payload) => syncAuthoritativeKey(k, reqSeq, payload))
+            .catch(() => undefined);
         }
       }, 250);
       return;
     }
     const parsed = Number(trimmed);
     if (!Number.isFinite(parsed) || parsed < 0 || parsed >= 100) return;
+    const reqKey = calibrationKey;
+    const reqSeq = bumpKeySeq(reqKey);
+    deletedAtByKeyRef.current.delete(reqKey);
     const entry: WeeklyQuotaCalibration = {
       remainingPct: parsed,
       calibratedCostUsd: totals.estimatedCostUsd,
@@ -257,10 +357,7 @@ export function KpiCards({
       calibratedAt: new Date().toISOString(),
     };
     setCalibrations((prev) => {
-      const next: Record<string, WeeklyQuotaCalibration> = {
-        ...prev,
-        [calibrationKey]: entry,
-      };
+      const next = { ...prev, [reqKey]: entry };
       writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
       return next;
     });
@@ -269,8 +366,11 @@ export function KpiCards({
       void fetch("/api/calibrations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: calibrationKey, ...entry }),
-      }).catch(() => undefined);
+        body: JSON.stringify({ key: reqKey, source: "manual", ...entry }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((payload) => syncAuthoritativeKey(reqKey, reqSeq, payload))
+        .catch(() => undefined);
     }, 300);
   };
 
@@ -625,6 +725,14 @@ export function KpiCards({
                   max={99}
                   step={1}
                   inputMode="decimal"
+                  disabled={!canWriteWeeklyCalibration}
+                  title={
+                    calibrationSyncError
+                      ? calibrationSyncError
+                      : canWriteWeeklyCalibration
+                        ? undefined
+                        : "历史周视图或同步中仅支持只读查看，切回当前 7d 整池可修改校准"
+                  }
                   aria-label="输入官方周剩余百分比以反算周满额"
                   placeholder="--"
                   value={draftPct}
@@ -665,6 +773,13 @@ export function KpiCards({
                     </div>
                   </TooltipContent>
                 </Tooltip>
+              ) : calibrationSyncError ? (
+                <span
+                  title={calibrationSyncError}
+                  className="truncate text-[10px] text-amber-600 dark:text-amber-400"
+                >
+                  校准同步异常（已保留本地）
+                </span>
               ) : (
                 <span className="truncate text-[10px] text-slate-400 dark:text-slate-500">
                   填剩余%反算满额

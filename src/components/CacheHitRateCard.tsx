@@ -232,7 +232,7 @@ export function CacheHitRateCard({
     };
   }, [dailyTrend]);
 
-  // 1.3. 共享「近7天 | 今日 | TTL 衰减」切换器
+  // 1.3. 共享「按日 | 今日 | TTL 衰减」切换器（按日覆盖当前所选周期全部活跃日）
   const granularityTabs = (
     <Tabs
       value={granularity}
@@ -241,7 +241,7 @@ export function CacheHitRateCard({
     >
       <TabsList className="h-6 p-0.5">
         <TabsTrigger value="7d" className="px-2 text-[11px]">
-          近7天
+          按日
         </TabsTrigger>
         <TabsTrigger value="today" className="px-2 text-[11px]">
           今日
@@ -355,7 +355,7 @@ export function CacheHitRateCard({
               缓存命中率
             </CardTitle>
             <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums">
-              {days.length} 天 · 均 {formatPercent(periodCacheRate)}
+              {days.length} 活跃日 · 均 {formatPercent(periodCacheRate)}
             </Badge>
 
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-0.5 text-[11px]">
@@ -417,7 +417,7 @@ export function CacheHitRateCard({
               width={svgWidth}
               height={CHART_HEIGHT}
               role="img"
-              aria-label="近7天缓存命中率变化折线图"
+              aria-label="所选周期按日缓存命中率变化折线图"
               className="block w-full overflow-visible"
               onMouseLeave={() => setHoveredDayIdx(null)}
             >

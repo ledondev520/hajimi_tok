@@ -131,8 +131,10 @@ export interface UsageTimeBucket {
 /** 单次大模型增量调用节点（用于折线图逐节点趋势可视化） */
 export interface CallNodePoint {
   seq: number; // 当前过滤范围内按时间递增的全局调用序号（从 1 开始）
-  conversationId: string; // 所属顶层主会话 UUID
-  conversationTitle: string; // 所属顶层主会话标题
+  conversationId: string; // 实际执行本步的会话或子代理 UUID
+  conversationTitle: string; // 实际会话或子代理标题
+  rootConversationId?: string; // 所属顶层主会话 UUID
+  rootConversationTitle?: string; // 所属顶层主会话标题
   callIndex: number; // 会话内推理轮次（从 0 开始）
   timestamp: string; // ISO-8601 调用时间戳
   modelName: string; // 可读模型名称
@@ -280,6 +282,9 @@ export interface LivePoolQuotaSnapshot {
   remainingPct: number; // 官方周剩余百分比（0 ~ 100，精确到 0.1）
   resetTime: string; // 官方预计重置时刻 ISO-8601
   updatedAt: string; // 最近一次由 agy statusLine 推送写入时刻 ISO-8601
+  windowStart?: string; // 该采样归属的当前 7d 池周期起点 ISO-8601
+  poolCostUsdAtSample?: number; // 截至采样时刻该池全工作区累计等效成本（USD）
+  poolTokensAtSample?: number; // 截至采样时刻该池全工作区累计总 Token
 }
 
 /** /api/summary 返回的完整看板载荷 */
@@ -326,6 +331,17 @@ export interface TelemetryProvider {
   addReset?(input: { timestamp: string; pool: "all" | "gemini" | "claude"; note?: string }): QuotaResetEvent[];
   deleteReset?(id: string): QuotaResetEvent[];
   getCalibrations?(): Record<string, WeeklyQuotaCalibration>;
-  setCalibration?(key: string, value: WeeklyQuotaCalibration): Record<string, WeeklyQuotaCalibration>;
-  deleteCalibration?(key: string): Record<string, WeeklyQuotaCalibration>;
+  getCalibrationsState?():
+    | { ok: true; calibrations: Record<string, WeeklyQuotaCalibration>; initialized: boolean }
+    | { ok: false; error: string };
+  isCalibrationsInitialized?(): boolean;
+  setCalibration?(
+    key: string,
+    value: WeeklyQuotaCalibration,
+    options?: { source?: "manual" | "auto" }
+  ): Record<string, WeeklyQuotaCalibration>;
+  migrateCalibrationsBatch?(
+    entries: Record<string, WeeklyQuotaCalibration>
+  ): { conflict: boolean; calibrations: Record<string, WeeklyQuotaCalibration> };
+  deleteCalibration?(key: string, deletedAt?: string): Record<string, WeeklyQuotaCalibration>;
 }

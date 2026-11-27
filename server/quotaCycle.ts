@@ -204,7 +204,7 @@ export function computeQuotaCycleWindow(
         claudeEntries.push(entry);
       } else if (matchesModelQuery(step.modelName, step.modelId, "pool:gemini")) {
         geminiEntries.push(entry);
-      } else if (!matchesModelQuery(step.modelName, step.modelId, "gpt-oss")) {
+      } else {
         otherEntries.push(entry);
       }
     }
@@ -307,6 +307,7 @@ export function computeQuotaCycleWindow(
   };
 
   const needle = modelQuery.toLowerCase();
+  const isSinglePool = needle === "pool:claude" || needle === "pool:gemini";
   const activePools =
     needle === "pool:claude"
       ? [{ c5: claude5h, c7: claude7d }]
@@ -319,9 +320,16 @@ export function computeQuotaCycleWindow(
           ];
 
   const active5hTokens = activePools.reduce((s, p) => s + p.c5.active.totalTokens, 0);
-  const active7dTokens = activePools.reduce((s, p) => s + p.c7.active.totalTokens, 0);
+  // 全部/非单池视图统一以 merged7d 切分口径汇总当前 7d 与历史周选项，确保各期加总不重不漏且与选择器数字完全一致
+  const active7dTokens = isSinglePool
+    ? activePools.reduce((s, p) => s + p.c7.active.totalTokens, 0)
+    : merged7d.active.totalTokens;
   const live5hEnds = activePools.filter((p) => !p.c5.active.isIdleReset).map((p) => p.c5.active.endMs);
-  const live7dEnds = activePools.filter((p) => !p.c7.active.isIdleReset).map((p) => p.c7.active.endMs);
+  const live7dEnds = isSinglePool
+    ? activePools.filter((p) => !p.c7.active.isIdleReset).map((p) => p.c7.active.endMs)
+    : !merged7d.active.isIdleReset
+      ? [merged7d.active.endMs]
+      : [];
   const active5hResetsAt = live5hEnds.length > 0 ? new Date(Math.min(...live5hEnds)).toISOString() : "";
   const active7dResetsAt = live7dEnds.length > 0 ? new Date(Math.min(...live7dEnds)).toISOString() : "";
 
@@ -409,7 +417,31 @@ export function computeQuotaCycleWindow(
     };
   }
 
-  // 1.3. 5h / prev-5h / 7d / prev-7d：每步按自身所属配额池的真实窗口截断
+  // 1.3. 7d / prev-7d 在「全部」视图与 available7dCycles 共享 merged7d 单一分区口径；单池与 5h/prev-5h 按池独立窗口截断
+  if (!isSinglePool && (mode === "7d" || mode === "prev-7d")) {
+    const blk = mode === "7d" ? merged7d.active : merged7d.prev;
+    const isIdleReset = mode === "7d" && (!blk || blk.isIdleReset);
+    const hasWindow = Boolean(blk && !isIdleReset && blk.endMs > blk.startMs);
+    const startMs = hasWindow ? blk!.startMs : 0;
+    const endMs = hasWindow ? blk!.endMs : 0;
+    return {
+      quotaWindow: {
+        mode,
+        label: modeLabel,
+        windowStart: hasWindow ? new Date(startMs).toISOString() : "",
+        windowEnd: hasWindow ? new Date(endMs).toISOString() : "",
+        resetsInMs: mode === "7d" && hasWindow ? Math.max(0, endMs - nowMs) : 0,
+        isIdleReset,
+        active5hTokens,
+        active5hResetsAt,
+        active7dTokens,
+        active7dResetsAt,
+        available7dCycles,
+      },
+      stepTimeFilter: (_mName, _mId, tsMs) => hasWindow && tsMs >= startMs && tsMs < endMs,
+    };
+  }
+
   const rClaude = rangeForPool(claude5h, claude7d);
   const rGemini = rangeForPool(gemini5h, gemini7d);
   const rOther = rangeForPool(other5h, other7d);

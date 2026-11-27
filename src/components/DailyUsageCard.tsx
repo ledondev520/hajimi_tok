@@ -335,7 +335,7 @@ export function DailyUsageCard({
     };
   }, [dailyTrend]);
 
-  // 1.3. 共享的「近7天 | 今日」粒度切换标签栏
+  // 1.3. 共享的「按日 | 今日」粒度切换标签栏（按日覆盖当前所选周期全部活跃日）
   const granularityTabs = (
     <Tabs
       value={granularity}
@@ -344,7 +344,7 @@ export function DailyUsageCard({
     >
       <TabsList className="h-6 p-0.5">
         <TabsTrigger value="7d" className="px-2 text-[11px]">
-          近7天
+          按日
         </TabsTrigger>
         <TabsTrigger value="today" className="px-2 text-[11px]">
           今日
@@ -446,7 +446,7 @@ export function DailyUsageCard({
               每日消耗
             </CardTitle>
             <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums">
-              {days.length} 天 · 日均 {formatTokens(avgTokens)} · {formatUsd(avgCost)}
+              {days.length} 活跃日 · 均 {formatTokens(avgTokens)} · {formatUsd(avgCost)}
             </Badge>
 
             {/* 周期模型图例 + 主次双轴线型说明（均支持点击显隐） */}
@@ -521,7 +521,7 @@ export function DailyUsageCard({
               width={svgWidth}
               height={CHART_HEIGHT}
               role="img"
-              aria-label="近7天分模型 Token 与费用主次双轴折线图"
+              aria-label="所选周期按日分模型 Token 与费用主次双轴折线图"
               className="block w-full overflow-visible"
               onMouseLeave={() => setHoveredDayIdx(null)}
             >
