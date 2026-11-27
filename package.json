@@ -1,0 +1,48 @@
+{
+  "name": "hamiji-sta",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "哈吉米统计 — Standalone local telemetry & token usage analytics dashboard + CLI for Google AntiGravity",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "NODE_OPTIONS='--no-warnings' node scripts/dev.mjs",
+    "start": "NODE_OPTIONS='--no-warnings' tsx server/index.ts",
+    "stats": "NODE_OPTIONS='--no-warnings' tsx server/cli.ts",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_OPTIONS='--no-warnings' vitest run",
+    "check:rules": "node scripts/check-rules.mjs",
+    "lint": "npm run typecheck && npm run check:rules",
+    "service:install": "node scripts/service.mjs install",
+    "service:restart": "node scripts/service.mjs restart",
+    "service:stop": "node scripts/service.mjs stop",
+    "service:status": "node scripts/service.mjs status",
+    "update": "node scripts/update.mjs",
+    "statusline:install": "node scripts/statusline-bridge.mjs --install"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cn": "^0.5.2",
+    "lucide-react": "^0.511.0",
+    "radix-ui": "^1.8.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwind-merge": "^3.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.8",
+    "@types/node": "^22.15.29",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@vitejs/plugin-react": "^4.5.1",
+    "tailwindcss": "^4.1.8",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.1"
+  }
+}

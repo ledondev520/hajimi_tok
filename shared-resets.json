@@ -1,0 +1,26 @@
+[
+  {
+    "id": "shared-2026-11-18-gemini",
+    "timestamp": "2026-11-18T00:00:00.000Z",
+    "pool": "gemini",
+    "note": "周三强制重置"
+  },
+  {
+    "id": "shared-2026-11-21-gemini",
+    "timestamp": "2026-11-21T09:00:00.000Z",
+    "pool": "gemini",
+    "note": "周六提前重置"
+  },
+  {
+    "id": "shared-2026-11-24-gemini",
+    "timestamp": "2026-11-23T23:38:23.000Z",
+    "pool": "gemini",
+    "note": "周二提前重置"
+  },
+  {
+    "id": "shared-2026-11-26-gemini",
+    "timestamp": "2026-11-26T07:04:48.000Z",
+    "pool": "gemini",
+    "note": "周四提前重置"
+  }
+]

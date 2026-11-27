@@ -1,0 +1,13 @@
+node_modules/
+dist/
+logs/
+PATCHES/
+RESULTS/
+PLAN.md
+TASKS.md
+METRICS.md
+RISKS.md
+.env
+.env.*
+.DS_Store
+*.log
