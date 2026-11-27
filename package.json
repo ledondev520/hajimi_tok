@@ -21,7 +21,9 @@
     "service:stop": "node scripts/service.mjs stop",
     "service:status": "node scripts/service.mjs status",
     "update": "node scripts/update.mjs",
-    "statusline:install": "node scripts/statusline-bridge.mjs --install"
+    "statusline:install": "node scripts/statusline-bridge.mjs --install",
+    "hook:compact:install": "node scripts/compact-reminder-hook.mjs --install",
+    "hook:compact:uninstall": "node scripts/compact-reminder-hook.mjs --uninstall"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
