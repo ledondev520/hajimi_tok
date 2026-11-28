@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ConversationDetail, DataSourceHealth, ModelPriceRate, StepUsageRecord } from "../src/types/telemetry";
 import { calculateStepCost, DEFAULT_MODEL_PRICING, matchModelRate } from "./pricing";
 import { decodeGenMetadata, type ParsedGenMetadata } from "./protobuf";
+import { createPersistentScanCache } from "./scanCache";
 import { createT3ThreadIndex, type T3ThreadIndex } from "./t3Threads";
 import {
   filterEmptyConversations,
@@ -463,11 +464,14 @@ export function createTelemetryScanner(
   customRates?: ModelPriceRate[],
   t3UserdataDir?: string | null,
   sharedT3ThreadIndex?: T3ThreadIndex,
+  scanCachePath?: string | null,
 ) {
   const dataDir = customDataDir || resolveDefaultDataDir(); // 实际扫描根目录
   const rates = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效单价表
   const t3ThreadIndex = sharedT3ThreadIndex ?? createT3ThreadIndex(openSqliteSafe, t3UserdataDir); // T3 线程与正式标题只读索引器（多源模式共享单例）
+  const diskCache = scanCachePath ? createPersistentScanCache(scanCachePath, dataDir, rates) : null; // 可选落盘扫描索引（加速重启冷启动与 CLI）
   const cache = new Map<string, CachedConversationEntry>(); // 会话级增量缓存
+  let diskCacheLoaded = false; // 是否已从磁盘加载冷启动快照
   const SCAN_TTL_MS = 4000; // 短时扫描结果复用窗口（毫秒），避免单次多源汇总或切池期间重复 stat/SQLite 阻塞
   let scanVersion = 0; // 数据实际变更版本号，供聚合层安全命中结果缓存
   let lastScanAt = 0; // 上次完整增量扫描的时间戳
@@ -488,8 +492,19 @@ export function createTelemetryScanner(
         return lastSnapshot;
       }
       const t0 = performance.now();
-      if (forceRefresh) { cache.clear(); lastSummarySig = ""; }
+      let hadDiskSeed = false;
+      if (forceRefresh) {
+        cache.clear();
+        lastSummarySig = "";
+        diskCacheLoaded = true;
+      } else if (diskCache && !diskCacheLoaded) {
+        diskCacheLoaded = true;
+        const loaded = diskCache.load();
+        hadDiskSeed = loaded.size > 0;
+        for (const [k, v] of loaded.entries()) cache.set(k, v);
+      }
       let changed = forceRefresh || lastSnapshot === null;
+      let parsedCount = 0;
       const warnings: string[] = [];
       let sqliteReadMode: "wal-readonly" | "immutable-fallback" | "none" = "none";
       const trackMode = (m: "wal-readonly" | "immutable-fallback" | "none") => {
@@ -571,6 +586,7 @@ export function createTelemetryScanner(
         const hit = cache.get(id);
         if (!forceRefresh && hit && hit.fingerprint === fp) { trackMode(hit.readMode); conversations.push(hit.detail); continue; }
         changed = true;
+        parsedCount += 1;
 
         let hadConvReadError = false;
         const latestMtime = Math.max(getFileMtimeMs(jsonlPath), getFileMtimeMs(dbPath));
@@ -647,7 +663,8 @@ export function createTelemetryScanner(
       }
 
       // 4. 清理过期缓存、归并 Swarm/子代理工作区、过滤无调用空壳并回填子代理数与标题
-      for (const k of cache.keys()) if (!allIds.has(k)) { cache.delete(k); changed = true; }
+      let evicted = false;
+      for (const k of cache.keys()) if (!allIds.has(k)) { cache.delete(k); changed = true; evicted = true; }
       const byId = new Map(conversations.map((c) => [c.conversationId, c]));
       normalizeConversationWorkspaces(conversations, byId);
       const activeConversations = filterEmptyConversations(conversations, byId);
@@ -684,6 +701,9 @@ export function createTelemetryScanner(
       for (const c of activeConversations) c.subagentCount = childCounts.get(c.conversationId) ?? 0;
 
       if (changed) scanVersion++;
+      if (diskCache && !hadAnyReadError && (parsedCount > 0 || evicted)) {
+        diskCache.scheduleSave(cache, !hadDiskSeed || parsedCount >= 5);
+      }
       lastScanAt = hadAnyReadError ? 0 : Date.now();
       lastSnapshot = {
         conversations: activeConversations,

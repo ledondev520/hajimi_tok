@@ -4,7 +4,7 @@
  * Pos: 看板中部趋势可视化扩展卡片，专门追踪 Prompt 缓存命中率波动与实测缓存 TTL 衰减曲线（src/components/CacheHitRateCard.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Percent } from "lucide-react";
 import type {
   CacheTtlSummary,
@@ -21,7 +21,9 @@ import {
   readStoredJson,
   writeStoredJson,
 } from "@/lib/format";
-import { CacheTtlPanel } from "@/components/CacheTtlPanel";
+const CacheTtlPanel = lazy(() =>
+  import("@/components/CacheTtlPanel").then((m) => ({ default: m.CacheTtlPanel }))
+);
 import {
   extractTodayCallSummary,
   resolveDayMeta,
@@ -256,14 +258,16 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
     </Tabs>
   );
 
-  // 2.0. 「TTL 衰减」模式：展示空闲间隔衰减折线与各项目上次有效时长速览
+  // 2.0. 「TTL 衰减」模式：按需懒加载空闲间隔衰减折线与各项目上次有效时长速览
   if (granularity === "ttl") {
     return (
-      <CacheTtlPanel
-        cacheTtl={cacheTtl}
-        byWorkspace={byWorkspace}
-        leadingTabsSlot={granularityTabs}
-      />
+      <Suspense fallback={<div className="h-[220px] rounded-xl border border-slate-200/80 bg-white dark:border-slate-800 dark:bg-slate-900/70" />}>
+        <CacheTtlPanel
+          cacheTtl={cacheTtl}
+          byWorkspace={byWorkspace}
+          leadingTabsSlot={granularityTabs}
+        />
+      </Suspense>
     );
   }
 

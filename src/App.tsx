@@ -4,7 +4,7 @@
  * Pos: 前端单页根组件，自动识别本机已用模型生成顶栏快捷切换并展示单行四卡与主会话折叠表。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CalendarDays, Moon, Sun } from "lucide-react";
 import type {
   ConversationUsageSummary,
@@ -26,9 +26,14 @@ import {
   ConversationExplorer,
   groupByMainConversation,
 } from "@/components/ConversationExplorer";
-import { ConversationDetailDialog } from "@/components/ConversationDetailDialog";
-import { ResetCalendarPage } from "@/components/ResetCalendarPage";
 import { SourceSwitcherBar } from "@/components/SourceSwitcherBar";
+
+const ConversationDetailDialog = lazy(() =>
+  import("@/components/ConversationDetailDialog").then((m) => ({ default: m.ConversationDetailDialog }))
+);
+const ResetCalendarPage = lazy(() =>
+  import("@/components/ResetCalendarPage").then((m) => ({ default: m.ResetCalendarPage }))
+);
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -111,27 +116,9 @@ export function buildModelShortcuts(availableModels: string[]): ModelShortcutIte
       : "Gemini 全系列独立配额池";
 
   const items: ModelShortcutItem[] = [
-    {
-      tabValue: "all",
-      modelQuery: "",
-      label: "全部",
-      tooltip: "汇总全部配额池的总体消耗",
-      hotkey: "1",
-    },
-    {
-      tabValue: "pool:claude",
-      modelQuery: "pool:claude",
-      label: "Claude 池",
-      tooltip: claudeDesc,
-      hotkey: "2",
-    },
-    {
-      tabValue: "pool:gemini",
-      modelQuery: "pool:gemini",
-      label: "Gemini 池",
-      tooltip: geminiDesc,
-      hotkey: "3",
-    },
+    { tabValue: "all", modelQuery: "", label: "全部", tooltip: "汇总全部配额池的总体消耗", hotkey: "1" },
+    { tabValue: "pool:claude", modelQuery: "pool:claude", label: "Claude 池", tooltip: claudeDesc, hotkey: "2" },
+    { tabValue: "pool:gemini", modelQuery: "pool:gemini", label: "Gemini 池", tooltip: geminiDesc, hotkey: "3" },
   ];
 
   // 1.2. 若未来出现非 Claude / 非 Gemini 的其他独立模型池，从快捷键 4 起顺延追加
@@ -186,9 +173,13 @@ function resolveInitialCycle(): QuotaCycleMode {
  * 返回值：React 根视图节点。
  */
 export function App() {
-  // 0. 独立重置日历页面路由（支持新标签页直开 /calendar）
+  // 0. 独立重置日历页面路由（按需懒加载，不占主看板首包体积）
   if (typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/calendar") {
-    return <ResetCalendarPage />;
+    return (
+      <Suspense fallback={<div className="py-16 text-center text-xs text-slate-400">正在加载重置日历...</div>}>
+        <ResetCalendarPage />
+      </Suspense>
+    );
   }
 
   // 0.1. 筛选、主题与详情弹窗状态（配额池、项目、节点窗口与周期均持久化至 localStorage）
@@ -778,16 +769,18 @@ export function App() {
           ) : null}
         </main>
 
-        {/* 点击会话“详情”弹出的单步 Token 拆解对话框 */}
-        <ConversationDetailDialog
-          conversationId={activeConvId}
-          sourceId={appliedSource}
-          open={activeConvId !== null}
-          onOpenChange={(open) => {
-            if (!open) setActiveConvId(null);
-          }}
-          customRates={null}
-        />
+        {/* 点击会话“详情”按需加载的单步 Token 拆解对话框 */}
+        {activeConvId !== null && (
+          <Suspense fallback={null}>
+            <ConversationDetailDialog
+              conversationId={activeConvId}
+              sourceId={appliedSource}
+              open
+              onOpenChange={(open) => { if (!open) setActiveConvId(null); }}
+              customRates={null}
+            />
+          </Suspense>
+        )}
       </div>
     </TooltipProvider>
   );

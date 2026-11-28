@@ -11,7 +11,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryService } from "../server/aggregator";
 import { createMultiSourceTelemetryService } from "../server/multiSource";
-import { parseWorkspaceUris, TEMP_CHAT_WORKSPACE } from "../server/scanner";
+import { createTelemetryScanner, parseWorkspaceUris, TEMP_CHAT_WORKSPACE } from "../server/scanner";
+import { resolveScanCachePath } from "../server/scanCache";
 import { createT3ThreadIndex } from "../server/t3Threads";
 import { extractTodayCallSummary } from "../src/components/DailyUsageCard";
 import { groupByMainConversation } from "../src/lib/conversationGroups";
@@ -478,5 +479,33 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     expect(conv.stepCount).toBe(10);
     expect(conv.lastModifiedAt).toBe("2026-11-28T01:05:00.000Z");
     expect(conv.firstPromptPreview).toBe("hello fast scan");
+  });
+
+  it("persists scan cache across fresh scanner instances and auto-invalidates on pricing change", () => {
+    const dataDir = makeTempDir("hajimi-scan-cache-data-");
+    const stateDir = makeTempDir("hajimi-scan-cache-state-");
+    const convId = "12121212-1212-4121-8121-121212121212";
+    writeJsonlStep(dataDir, convId, "2026-11-28T02:00:00Z", 1_000_000);
+
+    const cachePath = resolveScanCachePath(stateDir, dataDir);
+    const rateA = [{ modelPattern: "*", label: "A", inputPerMillion: 10, cacheReadPerMillion: 1, outputPerMillion: 20 }];
+    const rateB = [{ modelPattern: "*", label: "B", inputPerMillion: 30, cacheReadPerMillion: 3, outputPerMillion: 60 }];
+
+    // 1. 首扫落盘生成 .json.gz 缓存
+    const sc1 = createTelemetryScanner(dataDir, rateA, null, undefined, cachePath);
+    const snap1 = sc1.scan(false);
+    expect(fs.existsSync(cachePath)).toBe(true);
+    expect(snap1.conversations[0].estimatedCostUsd).toBeCloseTo(10 + (100 / 1_000_000) * 20, 6);
+
+    // 2. 新扫描实例按同费率命中磁盘缓存（即使不重新解析也保留完整明细）
+    const sc2 = createTelemetryScanner(dataDir, rateA, null, undefined, cachePath);
+    const snap2 = sc2.scan(false);
+    expect(snap2.conversations[0].inputTokens).toBe(1_000_000);
+    expect(snap2.conversations[0].estimatedCostUsd).toBeCloseTo(snap1.conversations[0].estimatedCostUsd, 6);
+
+    // 3. 费率变更时自动失效旧磁盘缓存并按新费率重算成本
+    const sc3 = createTelemetryScanner(dataDir, rateB, null, undefined, cachePath);
+    const snap3 = sc3.scan(false);
+    expect(snap3.conversations[0].estimatedCostUsd).toBeCloseTo(30 + (100 / 1_000_000) * 60, 6);
   });
 });

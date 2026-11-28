@@ -5,6 +5,7 @@
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { computeWeeklyQuotaProjection, resolveWeeklyCalibration } from "../src/lib/format";
 import type {
@@ -21,6 +22,7 @@ import type {
 import { createTelemetryService, type TelemetryServiceOptions } from "./aggregator";
 import { DEFAULT_MODEL_PRICING } from "./pricing";
 import { readLiveQuotaSnapshots, resolveSharedResetsPath } from "./resetStore";
+import { resolveScanCachePath } from "./scanCache";
 import { createTelemetryScanner, openSqliteSafe } from "./scanner";
 import { createT3ThreadIndex, type T3ThreadIndex } from "./t3Threads";
 import {
@@ -53,15 +55,18 @@ function createAccountDirScanner(
   dirs: string[],
   pricing: ModelPriceRate[],
   t3UserdataDir?: string | null,
-  sharedT3ThreadIndex?: T3ThreadIndex
+  sharedT3ThreadIndex?: T3ThreadIndex,
+  scanCacheRootDir?: string | null
 ): TelemetryScannerInstance {
   const uniqueDirs = [...new Set(dirs.filter(Boolean))];
+  const toCachePath = (dir?: string) =>
+    scanCacheRootDir && dir ? resolveScanCachePath(scanCacheRootDir, dir) : undefined;
   if (uniqueDirs.length <= 1) {
-    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir, sharedT3ThreadIndex);
+    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(uniqueDirs[0]));
   }
   const subScanners = uniqueDirs.map((dir) => ({
     dir,
-    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir, sharedT3ThreadIndex),
+    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(dir)),
   }));
   let compositeSig = "";
   let combinedVersion = 0;
@@ -374,6 +379,12 @@ export function createMultiSourceTelemetryService(
           stateRootDir: options.stateRootDir,
         });
 
+  const isolatedState = Boolean(options.isolated);
+  const resolvedStateRoot =
+    options.stateRootDir ||
+    process.env.AGY_STATE_DIR?.trim() ||
+    path.join(options.homeDir ?? os.homedir(), ".hamiji-sta");
+  const scanCacheRootDir = !isolatedState && !options.sources ? resolvedStateRoot : null;
   const t3DirForScanner =
     options.t3UserdataDir !== undefined ? options.t3UserdataDir : options.isolated ? null : undefined;
   const sharedT3ThreadIndex =
@@ -382,16 +393,18 @@ export function createMultiSourceTelemetryService(
   // 0. 单账号退化路径：与历史单源行为完全一致；若单账号自动归并了多个本地目录（如原生 App + CLI）则注入组合扫描器
   if (discovered.length <= 1) {
     const only = discovered[0];
+    const targetDirs = only ? [only.dataDir, ...(only.extraDataDirs ?? [])] : [];
     const singleOpts: TelemetryServiceOptions = {
       ...options,
       t3UserdataDir: t3DirForScanner,
-      ...(only?.extraDataDirs && only.extraDataDirs.length > 0
+      ...(targetDirs.length > 0 && (targetDirs.length > 1 || scanCacheRootDir)
         ? {
             scanner: createAccountDirScanner(
-              [only.dataDir, ...only.extraDataDirs],
+              targetDirs,
               pricing,
               t3DirForScanner,
-              sharedT3ThreadIndex
+              sharedT3ThreadIndex,
+              scanCacheRootDir
             ),
           }
         : {}),
@@ -401,12 +414,11 @@ export function createMultiSourceTelemetryService(
   }
 
   // 1.1. 为每个逻辑账号创建组合扫描器与独立校准/重置存储的单源服务（同时继承仓库公共强制重置日历 shared-resets.json）
-  const isolatedState = Boolean(options.isolated);
   const sharedResetsPath =
     options.sharedResetsPath ?? (!isolatedState ? (resolveSharedResetsPath() ?? undefined) : undefined);
   const entries: SourceEntry[] = discovered.map((meta) => {
     const dirs = [meta.dataDir, ...(meta.extraDataDirs ?? [])];
-    const rawScanner = createAccountDirScanner(dirs, pricing, t3DirForScanner, sharedT3ThreadIndex);
+    const rawScanner = createAccountDirScanner(dirs, pricing, t3DirForScanner, sharedT3ThreadIndex, scanCacheRootDir);
     const taggedScanner = createTaggedScanner(rawScanner, meta);
     const resolvedLiveQuotaPath =
       meta.liveQuotaPath ??
