@@ -11,9 +11,7 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
-  Moon,
   Plus,
-  Sun,
   Trash2,
 } from "lucide-react";
 import type { DataSourceInfo, QuotaResetEvent } from "@/types/telemetry";
@@ -24,6 +22,8 @@ import {
   toLocalDayKey,
   type ResetCalendarItem,
 } from "@/lib/format";
+import { useThemeState } from "@/lib/theme";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,7 +37,6 @@ import {
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-const THEME_STORAGE_KEY = "agy_theme_mode"; // 与主看板共享的主题偏好键
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]; // 月历表头（周一为首列）
 const POOL_LABEL: Record<QuotaResetEvent["pool"], string> = {
   all: "双池",
@@ -58,13 +57,7 @@ function toDatetimeLocalValue(d: Date): string {
  */
 export function ResetCalendarPage() {
   // 0. 主题、重置记录列表、当前查看月份与登记表单状态
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    try {
-      return window.localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
-    } catch {
-      return "light";
-    }
-  });
+  const theme = useThemeState();
   const [sources, setSources] = useState<DataSourceInfo[]>([]);
   const [activeSource, setActiveSource] = useState<string>(() => {
     try {
@@ -111,13 +104,7 @@ export function ResetCalendarPage() {
 
   useEffect(() => {
     document.title = "哈吉米统计 · 重置日历";
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      /* ignore */
-    }
-  }, [theme]);
+  }, []);
 
   const loadResets = useCallback(async () => {
     try {
@@ -239,14 +226,16 @@ export function ResetCalendarPage() {
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
-        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white shadow-2xs dark:border-slate-800/80 dark:bg-slate-950">
-          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-2.5 sm:px-5">
+      <div className="theme-canvas min-h-screen">
+        <header className="theme-header sticky top-0 z-30 border-b">
+          <div className="mx-auto flex max-w-[1320px] flex-wrap items-center justify-between gap-2 px-4 py-2.5 sm:px-6">
             <div className="flex items-center gap-2.5">
-              <div className="flex size-6 items-center justify-center rounded-md bg-indigo-600 text-white">
+              <div className="theme-brand-badge flex size-7 items-center justify-center rounded-lg">
                 <Activity className="size-3.5" />
               </div>
-              <h1 className="text-sm font-semibold tracking-tight">重置日历</h1>
+              <h1 className="text-[13px] font-semibold tracking-tight text-[var(--theme-text)]">
+                重置日历
+              </h1>
               {sources.length > 1 && (
                 <Select
                   value={activeSource || sources[0].id}
@@ -261,7 +250,7 @@ export function ResetCalendarPage() {
                   <SelectTrigger
                     aria-label="切换重置日历账号"
                     size="sm"
-                    className="h-6 min-w-[108px] px-2 text-[11px]"
+                    className="h-8 min-w-[116px] rounded-lg px-2.5 text-xs"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -274,63 +263,45 @@ export function ResetCalendarPage() {
                   </SelectContent>
                 </Select>
               )}
-              <Button variant="outline" size="xs" asChild className="h-6 px-2 text-[11px]">
+              <Button variant="outline" size="xs" asChild className="h-8 rounded-lg px-2.5 text-xs">
                 <a href="/">
-                  <ArrowLeft className="size-3" />
-                  返回
+                  <ArrowLeft className="size-3.5" />
+                  返回面板
                 </a>
               </Button>
             </div>
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  aria-label={theme === "dark" ? "切换至白天模式" : "切换至深色模式"}
-                  onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
-                  className="h-7 w-7 p-0"
-                >
-                  {theme === "dark" ? (
-                    <Sun className="size-3.5 text-amber-400" />
-                  ) : (
-                    <Moon className="size-3.5 text-indigo-500" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{theme === "dark" ? "切换白天" : "切换深色"}</TooltipContent>
-            </Tooltip>
+            <ThemeSwitcher theme={theme} />
           </div>
         </header>
 
-        <main className="mx-auto max-w-6xl space-y-3.5 px-4 py-4 sm:px-5">
+        <main className="mx-auto max-w-[1320px] space-y-5 px-4 py-5 sm:px-6">
           {errorMsg && (
             <div
               role="alert"
-              className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+              className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-700 dark:text-rose-300"
             >
               {errorMsg}
             </div>
           )}
 
           {/* 单行极简登记条 */}
-          <Card className="border-slate-200/80 bg-white py-2.5 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-            <CardContent className="px-4">
-              <form onSubmit={handleAddReset} className="flex flex-wrap items-center gap-2">
+          <Card className="py-4">
+            <CardContent className="px-5">
+              <form onSubmit={handleAddReset} className="flex flex-wrap items-center gap-2.5">
                 <Input
                   type="datetime-local"
                   value={inputDatetime}
                   onChange={(e) => setInputDatetime(e.target.value)}
                   aria-label="重置日期与时间"
                   required
-                  className="h-8 w-46 font-mono text-xs tabular-nums"
+                  className="h-8 w-48 rounded-lg font-mono text-xs tabular-nums"
                 />
                 <Select
                   value={inputPool}
                   onValueChange={(v) => setInputPool(v as QuotaResetEvent["pool"])}
                 >
-                  <SelectTrigger aria-label="配额池" size="sm" className="h-8 w-24 text-xs">
+                  <SelectTrigger aria-label="配额池" size="sm" className="h-8 w-24 rounded-lg text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -344,9 +315,9 @@ export function ResetCalendarPage() {
                   value={inputNote}
                   onChange={(e) => setInputNote(e.target.value)}
                   placeholder="备注（可选）"
-                  className="h-8 min-w-[160px] flex-1 text-xs"
+                  className="h-8 min-w-[180px] flex-1 rounded-lg text-xs"
                 />
-                <Button type="submit" size="sm" disabled={submitting} className="h-8 px-3 text-xs">
+                <Button type="submit" size="sm" disabled={submitting} className="h-8 rounded-lg px-3.5 text-xs">
                   <Plus className="size-3.5" />
                   {submitting ? "保存中" : "登记"}
                 </Button>
@@ -355,12 +326,12 @@ export function ResetCalendarPage() {
           </Card>
 
           {/* 月历视图：同时标注实际重置与 +7 天自然重置 */}
-          <Card className="gap-2.5 border-slate-200/80 bg-white py-3 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-            <CardHeader className="px-4 pb-0">
+          <Card className="gap-3 py-4">
+            <CardHeader className="px-5 pb-0">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <CalendarDays className="size-4 text-indigo-500" />
-                  <CardTitle className="text-sm font-semibold tabular-nums">
+                <div className="flex items-center gap-2.5">
+                  <CalendarDays className="theme-accent-icon size-4" />
+                  <CardTitle className="text-[13px] font-semibold tracking-tight text-[var(--theme-text)] tabular-nums">
                     {viewYear} 年 {viewMonth + 1} 月
                   </CardTitle>
                   <div className="flex items-center gap-1">
@@ -370,7 +341,7 @@ export function ResetCalendarPage() {
                       size="xs"
                       aria-label="上一月"
                       onClick={() => shiftMonth(-1)}
-                      className="h-6 w-6 p-0"
+                      className="h-7 w-7 rounded-md p-0"
                     >
                       <ChevronLeft className="size-3.5" />
                     </Button>
@@ -383,7 +354,7 @@ export function ResetCalendarPage() {
                         setViewYear(t.getFullYear());
                         setViewMonth(t.getMonth());
                       }}
-                      className="h-6 px-2 text-[11px]"
+                      className="h-7 rounded-md px-2.5 text-[11px]"
                     >
                       今天
                     </Button>
@@ -393,7 +364,7 @@ export function ResetCalendarPage() {
                       size="xs"
                       aria-label="下一月"
                       onClick={() => shiftMonth(1)}
-                      className="h-6 w-6 p-0"
+                      className="h-7 w-7 rounded-md p-0"
                     >
                       <ChevronRight className="size-3.5" />
                     </Button>
@@ -401,52 +372,52 @@ export function ResetCalendarPage() {
                 </div>
 
                 {/* 极简图例 */}
-                <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400">
-                  <span className="inline-flex items-center gap-1">
-                    <span className="inline-block size-2.5 rounded-xs bg-emerald-500" />
+                <div className="flex flex-wrap items-center gap-3 text-[11px] text-[var(--theme-text-muted)]">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block size-2 rounded-full bg-emerald-500" />
                     实际
                   </span>
-                  <span className="inline-flex items-center gap-1">
-                    <span className="inline-block size-2.5 rounded-xs border border-dashed border-amber-500 bg-amber-500/15" />
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block size-2 rounded-xs border border-dashed border-amber-500 bg-amber-500/15" />
                     +7d 自然
                   </span>
-                  <span className="inline-flex items-center gap-1">
-                    <span className="inline-block size-2.5 rounded-xs border border-dashed border-slate-400 bg-slate-200/60 dark:bg-slate-800" />
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block size-2 rounded-xs border border-dashed border-[var(--theme-border-strong)] bg-[var(--theme-surface-muted)]" />
                     已覆盖
                   </span>
                 </div>
               </div>
             </CardHeader>
 
-            <CardContent className="px-4">
-              <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-medium text-slate-500 dark:text-slate-400">
+            <CardContent className="px-5">
+              <div className="grid grid-cols-7 gap-1.5 text-center text-[11px] font-medium text-[var(--theme-text-muted)]">
                 {WEEKDAYS.map((w) => (
-                  <div key={w} className="py-1">
+                  <div key={w} className="py-1.5">
                     {w}
                   </div>
                 ))}
               </div>
-              <div className="grid grid-cols-7 gap-1">
+              <div className="grid grid-cols-7 gap-1.5">
                 {monthCells.map((cell) => {
                   const isToday = cell.dayKey === todayKey;
                   const dayItems = itemsByDay.get(cell.dayKey) ?? [];
                   return (
                     <div
                       key={cell.dayKey}
-                      className={`min-h-[80px] rounded-md border p-1.5 text-left transition-colors ${
+                      className={`min-h-[84px] rounded-xl border p-2 text-left transition-colors ${
                         isToday
-                          ? "border-indigo-500 bg-indigo-50/40 dark:border-indigo-400 dark:bg-indigo-950/30"
+                          ? "border-[var(--theme-border-strong)] bg-[var(--theme-accent-soft)]"
                           : cell.inMonth
-                            ? "border-slate-200/80 bg-white dark:border-slate-800 dark:bg-slate-950/50"
-                            : "border-slate-100 bg-slate-50/50 opacity-50 dark:border-slate-900 dark:bg-slate-950/20"
+                            ? "border-[var(--theme-border)] bg-[var(--theme-surface-solid)]"
+                            : "border-[var(--theme-border)]/50 bg-[var(--theme-surface-muted)]/40 opacity-50"
                       }`}
                     >
-                      <div className="mb-1">
+                      <div className="mb-1.5">
                         <span
                           className={`inline-flex size-5 items-center justify-center rounded-full font-mono text-[11px] tabular-nums ${
                             isToday
-                              ? "bg-indigo-600 font-bold text-white"
-                              : "text-slate-700 dark:text-slate-300"
+                              ? "bg-[var(--theme-accent)] font-bold text-[var(--theme-accent-contrast)]"
+                              : "text-[var(--theme-text-secondary)]"
                           }`}
                         >
                           {cell.date.getDate()}
@@ -464,14 +435,14 @@ export function ResetCalendarPage() {
                                 ? "bg-sky-600 text-white"
                                 : "bg-emerald-600 text-white"
                             : isSuperseded
-                              ? "border border-dashed border-slate-300 bg-slate-100/80 text-slate-400 line-through dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500"
-                              : "border border-dashed border-amber-500/70 bg-amber-500/10 text-amber-800 dark:text-amber-300";
+                              ? "border border-dashed border-[var(--theme-border)] bg-[var(--theme-surface-muted)] text-[var(--theme-text-muted)] line-through"
+                              : "border border-dashed border-amber-500/65 bg-amber-500/10 text-amber-800 dark:text-amber-300";
 
                           return (
                             <Tooltip key={it.key}>
                               <TooltipTrigger asChild>
                                 <div
-                                  className={`cursor-default truncate rounded px-1 py-0.5 font-mono text-[10px] leading-tight tabular-nums ${pillCls}`}
+                                  className={`cursor-default truncate rounded-md px-1.5 py-0.5 font-mono text-[10px] leading-tight tabular-nums ${pillCls}`}
                                 >
                                   {it.timeText}{" "}
                                   {isActual
@@ -514,24 +485,31 @@ export function ResetCalendarPage() {
           </Card>
 
           {/* 极简记录清单 */}
-          <Card className="gap-2 border-slate-200/80 bg-white py-3 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-            <CardHeader className="px-4 pb-0">
+          <Card className="gap-3 py-4">
+            <CardHeader className="px-5 pb-0">
               <div className="flex items-center gap-2">
-                <CardTitle className="text-sm font-semibold">重置记录</CardTitle>
-                <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums">
+                <CardTitle className="text-[13px] font-semibold tracking-tight text-[var(--theme-text)]">
+                  重置记录
+                </CardTitle>
+                <Badge
+                  variant="secondary"
+                  className="theme-accent-pill h-5 rounded-full border px-2 font-mono text-[11px] tabular-nums"
+                >
                   {resets.length}
                 </Badge>
               </div>
             </CardHeader>
-            <CardContent className="px-4">
+            <CardContent className="px-5">
               {loading ? (
-                <div className="py-5 text-center text-xs text-slate-400">加载中...</div>
+                <div className="py-6 text-center text-xs text-[var(--theme-text-muted)]">
+                  加载中...
+                </div>
               ) : pairedRows.length === 0 ? (
-                <div className="rounded-md border border-dashed border-slate-200 py-5 text-center text-xs text-slate-400 dark:border-slate-800">
+                <div className="rounded-xl border border-dashed border-[var(--theme-border)] py-6 text-center text-xs text-[var(--theme-text-muted)]">
                   暂无记录
                 </div>
               ) : (
-                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                <div className="divide-y divide-[var(--theme-border)]">
                   {pairedRows.map(({ reset, actual, natural }) => {
                     const startText = formatDateTime(reset.timestamp).slice(0, 11);
                     const natText = natural
@@ -542,42 +520,47 @@ export function ResetCalendarPage() {
                     return (
                       <div
                         key={reset.id}
-                        className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs"
+                        className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-xs"
                       >
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="font-mono font-semibold tabular-nums">{startText}</span>
-                          <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+                          <span className="font-mono font-semibold text-[var(--theme-text)] tabular-nums">
+                            {startText}
+                          </span>
+                          <Badge variant="secondary" className="h-5 rounded-md px-1.5 text-[10px]">
                             {POOL_LABEL[reset.pool]}
                           </Badge>
                           {reset.source === "shared" && (
                             <Badge
                               variant="outline"
-                              className="h-5 border-indigo-400/40 px-1.5 text-[10px] text-indigo-600 dark:text-indigo-300"
+                              className="theme-accent-pill h-5 rounded-md px-1.5 text-[10px]"
                             >
                               公共
                             </Badge>
                           )}
-                          <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                          <span className="font-mono text-[11px] text-[var(--theme-text-muted)] tabular-nums">
                             → {natText}
                           </span>
                           {superseded && actual?.actualDurationMs ? (
                             <Badge
                               variant="outline"
-                              className="h-5 border-amber-500/40 px-1.5 text-[10px] text-amber-700 tabular-nums dark:text-amber-300"
+                              className="h-5 rounded-md border-amber-500/40 px-1.5 text-[10px] text-amber-700 tabular-nums dark:text-amber-300"
                             >
                               提前 · {formatCycleCountdown(actual.actualDurationMs)}
                             </Badge>
                           ) : remMs > 0 ? (
-                            <Badge className="h-5 bg-emerald-600 px-1.5 text-[10px] text-white tabular-nums">
+                            <Badge className="h-5 rounded-md bg-emerald-600 px-1.5 text-[10px] text-white tabular-nums">
                               剩余 {formatCycleCountdown(remMs)}
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-slate-500">
+                            <Badge
+                              variant="outline"
+                              className="h-5 rounded-md px-1.5 text-[10px] text-[var(--theme-text-muted)]"
+                            >
                               满 7d
                             </Badge>
                           )}
                           {reset.note && (
-                            <span className="truncate text-slate-500 dark:text-slate-400">
+                            <span className="truncate text-[var(--theme-text-muted)]">
                               {reset.note}
                             </span>
                           )}
@@ -589,7 +572,7 @@ export function ResetCalendarPage() {
                           aria-label={reset.source === "shared" ? "隐藏公共记录" : "删除记录"}
                           title={reset.source === "shared" ? "仅本机隐藏此公共记录" : "删除记录"}
                           onClick={() => void handleDeleteReset(reset.id)}
-                          className="h-6 w-6 p-0 text-slate-400 hover:text-red-600"
+                          className="h-7 w-7 rounded-md p-0 text-[var(--theme-text-muted)] hover:text-rose-600"
                         >
                           <Trash2 className="size-3.5" />
                         </Button>

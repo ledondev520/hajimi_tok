@@ -8,13 +8,14 @@ import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { buildVirtualThemeCss } from "./src/lib/themeCss";
 
 const VIRTUAL_TAILWIND_ID = "virtual:tailwind.css"; // 前端入口引用的虚拟样式标识
 const RESOLVED_VIRTUAL_TAILWIND_ID = "\0virtual:tailwind.css"; // Rollup/Vite 内部解析标识（保留 .css 后缀供 Tailwind 插件编译）
 
 /**
  * 职责：提供内存态虚拟 Tailwind CSS 入口，避免在仓库内创建任何物理 .css/.scss 文件。
- * 思路：1) 拦截 virtual:tailwind.css 解析请求；2) 返回 @import "tailwindcss" 供 @tailwindcss/vite 编译 Utility 类。
+ * 思路：1) 拦截 virtual:tailwind.css 解析请求；2) 返回含多主题 CSS 变量与 @import "tailwindcss" 的源码供 @tailwindcss/vite 编译。
  * 参数：无。
  * 返回值：Vite Plugin 实例。
  */
@@ -30,9 +31,9 @@ function virtualTailwindPlugin(): Plugin {
       return null;
     },
     load(id: string) {
-      // 1.2. 返回 Tailwind v4 标准导入指令与暗色变体声明
+      // 1.2. 返回 Tailwind v4 标准导入指令、暗色变体与多主题视觉令牌样式
       if (id === RESOLVED_VIRTUAL_TAILWIND_ID) {
-        return '@import "tailwindcss";\n@custom-variant dark (&:where(.dark, .dark *));\n';
+        return buildVirtualThemeCss();
       }
       return null;
     },

@@ -186,36 +186,42 @@ export const ConversationExplorer = memo(function ConversationExplorer({
   };
 
   return (
-    <Card className="gap-2.5 border-slate-200/80 bg-white py-3 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-      <CardHeader className="space-y-2 px-4 pb-0">
+    <Card className="gap-3 py-4">
+      <CardHeader className="space-y-3 px-5 pb-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <CardTitle className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+            <CardTitle className="text-[13px] font-semibold tracking-tight text-[var(--theme-text)]">
               主会话
             </CardTitle>
-            <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums">
+            <Badge
+              variant="secondary"
+              className="theme-accent-pill h-5 rounded-full border px-2 font-mono text-[11px] font-medium tabular-nums"
+            >
               {filteredGroups.length}
             </Badge>
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setOnlyWarm((v) => !v)}
               aria-pressed={onlyWarm}
               title="一键筛出缓存大概率仍热的会话，趁热续聊避免重烧"
-              className={`inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-xs font-medium tabular-nums transition-colors ${
+              className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium tabular-nums transition-colors ${
                 onlyWarm
-                  ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+                  ? "border-emerald-500/45 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                  : "border-[var(--theme-border)] bg-[var(--theme-surface-solid)] text-[var(--theme-text-secondary)] hover:border-[var(--theme-border-strong)] hover:bg-[var(--theme-surface-elevated)]"
               }`}
             >
               <span
                 className={`inline-block size-1.5 rounded-full ${
-                  warmGroupIds.size > 0 ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"
+                  warmGroupIds.size > 0
+                    ? "bg-emerald-500"
+                    : "bg-[var(--theme-text-muted)]/40"
                 }`}
               />
-              <span>缓存仍热 {warmGroupIds.size}</span>
+              <span>缓存仍热</span>
+              <span className="font-mono text-[11px] opacity-80">{warmGroupIds.size}</span>
             </button>
             {hasActiveFilter && (
               <Button
@@ -229,7 +235,7 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                   setIncludeArchived(true);
                   setOnlyWarm(false);
                 }}
-                className="h-7 px-2 text-xs text-indigo-600 dark:text-indigo-400"
+                className="theme-accent-text h-8 rounded-lg px-2.5 text-xs"
               >
                 <RotateCcw className="size-3" />
                 重置
@@ -238,14 +244,14 @@ export const ConversationExplorer = memo(function ConversationExplorer({
           </div>
         </div>
 
-        {/* 极简单行搜索栏（移除冗余项目与排序下拉，项目可点表格徽章直筛，排序直点表头） */}
+        {/* 极简单行搜索栏（搜索框内置 `/` 快捷键提示；项目直点徽章筛选；排序直点表头） */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-[200px] flex-1">
-            <Search className="pointer-events-none absolute top-2 left-2.5 size-3.5 text-slate-400" />
+          <div className="relative min-w-[220px] flex-1">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-[var(--theme-text-muted)]" />
             <Input
               ref={searchInputRef}
               aria-label="搜索会话、项目或 Prompt"
-              placeholder="搜索会话、项目或 Prompt (/)"
+              placeholder="搜索会话标题、项目或 Prompt..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -254,8 +260,22 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                   e.currentTarget.blur();
                 }
               }}
-              className="h-7 bg-white pl-8 text-xs text-slate-900 dark:bg-slate-950/70 dark:text-slate-100"
+              className="h-8 rounded-lg border-[var(--theme-border)] bg-[var(--theme-surface-solid)] pr-8 pl-8 text-xs text-[var(--theme-text)] placeholder:text-[var(--theme-text-muted)]"
             />
+            {searchQuery ? (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                aria-label="清空搜索"
+                className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer rounded p-0.5 text-[var(--theme-text-muted)] transition-colors hover:text-[var(--theme-text)]"
+              >
+                <X className="size-3.5" />
+              </button>
+            ) : (
+              <kbd className="pointer-events-none absolute top-1/2 right-2 hidden -translate-y-1/2 rounded border border-[var(--theme-border)] bg-[var(--theme-surface-elevated)] px-1.5 py-0.5 font-mono text-[10px] leading-none text-[var(--theme-text-muted)] sm:inline-block">
+                /
+              </kbd>
+            )}
           </div>
 
           {selectedWorkspace && (
@@ -263,14 +283,14 @@ export const ConversationExplorer = memo(function ConversationExplorer({
               type="button"
               onClick={() => onWorkspaceChange("")}
               title="点击清除项目筛选"
-              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 text-xs text-indigo-700 dark:text-indigo-300"
+              className="theme-accent-pill inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium"
             >
-              <span className="max-w-28 truncate">{selectedWorkspace}</span>
+              <span className="max-w-32 truncate">{selectedWorkspace}</span>
               <X className="size-3" />
             </button>
           )}
 
-          <label className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 px-2.5 text-[11px] text-slate-600 select-none dark:border-slate-800 dark:text-slate-300">
+          <label className="flex h-8 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-[var(--theme-border)] bg-[var(--theme-surface-solid)] px-2.5 text-xs text-[var(--theme-text-secondary)] select-none transition-colors hover:border-[var(--theme-border-strong)]">
             <Switch
               size="sm"
               checked={includeArchived}
@@ -282,392 +302,424 @@ export const ConversationExplorer = memo(function ConversationExplorer({
         </div>
       </CardHeader>
 
-      <CardContent className="px-4">
+      <CardContent className="px-5">
         {filteredGroups.length === 0 ? (
-          <div className="rounded-md border border-dashed border-slate-200 py-8 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <div className="rounded-xl border border-dashed border-[var(--theme-border)] py-10 text-center text-xs text-[var(--theme-text-muted)]">
             暂无匹配会话
           </div>
         ) : (
-          <Table className="text-xs">
-            <TableHeader>
-              <TableRow className="border-slate-200/80 dark:border-slate-800">
-                <TableHead className="h-8 w-9 px-1.5 py-1 text-center text-xs text-slate-500 dark:text-slate-400">
-                  明细
-                </TableHead>
-                <TableHead className="h-8 max-w-44 py-1 text-xs text-slate-500 lg:max-w-64 dark:text-slate-400">
-                  主会话
-                </TableHead>
-                <TableHead className="h-8 py-1 text-xs text-slate-500 dark:text-slate-400">
-                  项目
-                </TableHead>
-                <TableHead className="h-8 py-1 text-xs text-slate-500 dark:text-slate-400">
-                  主模型
-                </TableHead>
-                {(
-                  [
-                    { key: "calls", label: "轮数" },
-                    { key: "cacheRate", label: "新增 / 缓存 / 输出" },
-                    { key: "tokens", label: "总 Token" },
-                    { key: "cost", label: "成本" },
-                    { key: "recent", label: "活跃" },
-                  ] as const
-                ).map((col) => {
-                  const active = sortBy === col.key;
-                  const Icon = sortDir === "desc" ? ArrowDown : ArrowUp;
-                  return (
-                    <TableHead
-                      key={col.key}
-                      className="h-8 py-1 text-right text-xs text-slate-500 dark:text-slate-400"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => handleToggleSort(col.key)}
-                        className={`inline-flex cursor-pointer items-center gap-0.5 transition-colors hover:text-slate-900 dark:hover:text-slate-100 ${
-                          active ? "font-semibold text-indigo-600 dark:text-indigo-400" : ""
-                        }`}
+          <div className="overflow-hidden rounded-xl border border-[var(--theme-border)]">
+            <Table className="text-xs">
+              <TableHeader>
+                <TableRow className="border-b border-[var(--theme-border)] bg-[var(--theme-surface-muted)]/55 hover:bg-[var(--theme-surface-muted)]/55">
+                  <TableHead className="h-9 w-9 px-2 py-1 text-center text-[11px] font-medium text-[var(--theme-text-muted)]">
+                    明细
+                  </TableHead>
+                  <TableHead className="h-9 max-w-48 py-1 text-[11px] font-medium text-[var(--theme-text-muted)] lg:max-w-72">
+                    主会话
+                  </TableHead>
+                  <TableHead className="h-9 py-1 text-[11px] font-medium text-[var(--theme-text-muted)]">
+                    项目
+                  </TableHead>
+                  <TableHead className="h-9 py-1 text-[11px] font-medium text-[var(--theme-text-muted)]">
+                    主模型
+                  </TableHead>
+                  {(
+                    [
+                      { key: "calls", label: "轮数" },
+                      { key: "cacheRate", label: "新增 / 缓存 / 输出" },
+                      { key: "tokens", label: "总 Token" },
+                      { key: "cost", label: "成本" },
+                      { key: "recent", label: "活跃" },
+                    ] as const
+                  ).map((col) => {
+                    const active = sortBy === col.key;
+                    const Icon = sortDir === "desc" ? ArrowDown : ArrowUp;
+                    return (
+                      <TableHead
+                        key={col.key}
+                        className="h-9 py-1 text-right text-[11px] font-medium text-[var(--theme-text-muted)]"
                       >
-                        <span>{col.label}</span>
-                        {active && <Icon className="size-3" />}
-                      </button>
-                    </TableHead>
-                  );
-                })}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {visibleGroups.map((group) => {
-                const { root, children } = group;
-                const hasSub = children.length > 0;
-                const isExpanded = expandedRootIds.has(root.conversationId);
-                const ctxHealth = !root.archived
-                  ? resolveContextHealth(
-                      root.latestContextUsed ?? root.peakContextUsed,
-                      root.contextLimit
-                    )
-                  : null;
-                const rootTtl = root.cacheTtl;
-                const liveWarmth = !root.archived
-                  ? resolveLiveCacheWarmth(group.rolledLastModifiedAt, root.primaryModel, rootTtl)
-                  : null;
-
-                return (
-                  <Fragment key={root.conversationId}>
-                    {/* 顶层主会话单行高密度展示（包含全部下属 Subagent 汇总值） */}
-                    <TableRow className="border-slate-200/60 dark:border-slate-800/70">
-                      <TableCell className="w-9 px-1.5 py-1.5 text-center">
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant="outline"
-                          aria-label="查看会话详情"
-                          title="查看会话详情"
-                          onClick={() => onInspectConversation(root)}
-                          className="h-6 w-6 p-0"
-                        >
-                          <Eye className="size-3.5" />
-                        </Button>
-                      </TableCell>
-
-                      <TableCell className="max-w-44 py-1.5 lg:max-w-64">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                type="button"
-                                onClick={() => onInspectConversation(root)}
-                                className="min-w-0 cursor-pointer truncate text-left font-medium text-slate-900 hover:text-indigo-600 dark:text-slate-100 dark:hover:text-indigo-400"
-                              >
-                                {root.title || `会话 ${root.conversationId.slice(0, 8)}`}
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-sm">
-                              {root.firstPromptPreview || "点击查看单步明细"}
-                            </TooltipContent>
-                          </Tooltip>
-                          {hasSub && (
-                            <button
-                              type="button"
-                              onClick={() => toggleExpand(root.conversationId)}
-                              aria-expanded={isExpanded}
-                              aria-label={isExpanded ? "收起明细" : "展开明细"}
-                              className="inline-flex shrink-0 items-center gap-0.5 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 transition-colors hover:bg-violet-500/20 dark:bg-violet-500/15 dark:text-violet-300"
-                            >
-                              {isExpanded ? (
-                                <ChevronDown className="size-3" />
-                              ) : (
-                                <ChevronRight className="size-3" />
-                              )}
-                              {group.siblingRunCount > 1 && group.subagentChildCount > 0
-                                ? `含 ${group.siblingRunCount} 次运行 · ${group.subagentChildCount} 子代理`
-                                : group.siblingRunCount > 1
-                                  ? `含 ${group.siblingRunCount} 次运行`
-                                  : `含 ${children.length} 子代理`}
-                            </button>
-                          )}
-                          {ctxHealth && ctxHealth.level !== "ok" && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span
-                                  className={`inline-flex shrink-0 cursor-default items-center rounded px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums ${
-                                    ctxHealth.level === "high"
-                                      ? "bg-rose-500/10 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300"
-                                      : "bg-amber-500/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300"
-                                  }`}
-                                >
-                                  ctx {formatTokens(ctxHealth.used)}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-xs">
-                                当前上下文 {formatTokens(ctxHealth.used)}
-                                {ctxHealth.limit > 0
-                                  ? ` / ${formatTokens(ctxHealth.limit)} (${formatPercent(ctxHealth.ratio)})`
-                                  : ""}
-                                {ctxHealth.level === "high"
-                                  ? "，会话已偏胖，空闲超 3–5 分钟或偶发驱逐重热代价很高，建议立即 /compact 或开新会话"
-                                  : "，建议本阶段收尾后 /compact 或开新会话"}
-                              </TooltipContent>
-                            </Tooltip>
-                          )}
-                          {root.archived && (
-                            <Badge variant="secondary" className="h-4 shrink-0 px-1 text-[10px]">
-                              归档
-                            </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-
-                      <TableCell className="py-1.5">
                         <button
                           type="button"
-                          onClick={() =>
-                            root.workspaceName &&
-                            onWorkspaceChange(
-                              selectedWorkspace === root.workspaceName ? "" : root.workspaceName
-                            )
-                          }
-                          title={root.workspaceName ? "点击按该项目筛选" : undefined}
-                          className="inline-flex h-5 max-w-28 cursor-pointer items-center truncate rounded-md border border-slate-200 px-1.5 text-[11px] font-normal text-slate-700 transition-colors hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400"
+                          onClick={() => handleToggleSort(col.key)}
+                          className={`inline-flex cursor-pointer items-center gap-0.5 transition-colors hover:text-[var(--theme-text)] ${
+                            active ? "theme-accent-text font-semibold" : ""
+                          }`}
                         >
-                          {root.workspaceName || "临时对话"}
+                          <span>{col.label}</span>
+                          {active && <Icon className="size-3" />}
                         </button>
-                      </TableCell>
+                      </TableHead>
+                    );
+                  })}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleGroups.map((group) => {
+                  const { root, children } = group;
+                  const hasSub = children.length > 0;
+                  const isExpanded = expandedRootIds.has(root.conversationId);
+                  const ctxHealth = !root.archived
+                    ? resolveContextHealth(
+                        root.latestContextUsed ?? root.peakContextUsed,
+                        root.contextLimit
+                      )
+                    : null;
+                  const rootTtl = root.cacheTtl;
+                  const liveWarmth = !root.archived
+                    ? resolveLiveCacheWarmth(group.rolledLastModifiedAt, root.primaryModel, rootTtl)
+                    : null;
 
-                      <TableCell className="py-1.5 text-slate-700 dark:text-slate-300">
-                        <span
-                          title={root.primaryModel || "Unknown"}
-                          className="inline-flex items-center gap-1.5 truncate"
-                        >
-                          <span
-                            style={{
-                              backgroundColor: resolveModelStyle(root.primaryModel || "Unknown", 0)
-                                .color,
-                            }}
-                            className="inline-block size-2 shrink-0 rounded-full"
-                          />
-                          <span className="truncate">{compactModelName(root.primaryModel)}</span>
-                          {group.allModels.length > 1 && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="cursor-default rounded bg-slate-100 px-1 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                                  +{group.allModels.length - 1}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                涉及模型：{group.allModels.join("、")}
-                              </TooltipContent>
-                            </Tooltip>
-                          )}
-                        </span>
-                      </TableCell>
-
-                      <TableCell className="py-1.5 text-right text-slate-600 tabular-nums dark:text-slate-300">
-                        {formatExactNumber(group.rolledCallCount)}
-                      </TableCell>
-
-                      <TableCell className="py-1.5 text-right text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
-                        {formatTokens(group.rolledInputTokens)} /{" "}
-                        {formatTokens(group.rolledCacheReadTokens)} /{" "}
-                        {formatTokens(group.rolledOutputTokens)}
-                        <span className="ml-1 text-emerald-600 dark:text-emerald-400">
-                          ({formatPercent(group.rolledCacheHitRate)})
-                        </span>
-                        {rootTtl &&
-                          (rootTtl.lastEventGapMs !== null || rootTtl.maxKeptGapMs !== null) && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span
-                                  className={`ml-1 inline-flex cursor-default items-center rounded px-1 py-0.2 font-mono text-[10px] font-medium ${
-                                    rootTtl.lastEventKind === "expired"
-                                      ? "bg-rose-500/10 text-rose-600 dark:bg-rose-500/15 dark:text-rose-300"
-                                      : "bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
-                                  }`}
-                                >
-                                  {rootTtl.lastEventKind === "expired" &&
-                                  rootTtl.lastEventGapMs !== null
-                                    ? `失效 ${formatCompactGap(rootTtl.lastEventGapMs)}`
-                                    : `保活 ${formatCompactGap(rootTtl.lastEventGapMs ?? rootTtl.maxKeptGapMs)}`}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-xs space-y-0.5 text-[11px]">
-                                <div>
-                                  实测样本 {rootTtl.sampleCount} 笔 · 保活≤
-                                  {formatCompactGap(rootTtl.maxKeptGapMs)} · 失效中位{" "}
-                                  {formatCompactGap(
-                                    rootTtl.medianExpiredGapMs ?? rootTtl.minExpiredGapMs
-                                  )}
-                                </div>
-                                {rootTtl.lastEventKind && rootTtl.lastEventGapMs !== null && (
-                                  <div className="opacity-85">
-                                    上次事件：
-                                    {rootTtl.lastEventKind === "expired"
-                                      ? `空闲 ${formatCompactGap(rootTtl.lastEventGapMs)} 后缓存失效`
-                                      : `空闲 ${formatCompactGap(rootTtl.lastEventGapMs)} 仍保活`}
-                                    {rootTtl.lastEventAt
-                                      ? `（${formatDateTime(rootTtl.lastEventAt)}）`
-                                      : ""}
-                                  </div>
-                                )}
-                              </TooltipContent>
-                            </Tooltip>
-                          )}
-                      </TableCell>
-
-                      <TableCell className="py-1.5 text-right font-semibold text-slate-950 tabular-nums dark:text-slate-50">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="cursor-default">
-                              {formatTokens(group.rolledTotalTokens)}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            精确总计: {formatExactNumber(group.rolledTotalTokens)} tokens
-                          </TooltipContent>
-                        </Tooltip>
-                      </TableCell>
-
-                      <TableCell className="py-1.5 text-right font-medium text-slate-800 tabular-nums dark:text-slate-200">
-                        {formatUsd(group.rolledCostUsd)}
-                      </TableCell>
-
-                      <TableCell className="py-1.5 text-right text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex cursor-default items-center gap-1">
-                              {liveWarmth && liveWarmth.state !== "cold" && (
-                                <span
-                                  className={`rounded px-1 py-0.2 text-[10px] font-medium ${
-                                    liveWarmth.state === "warm"
-                                      ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-                                      : "bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
-                                  }`}
-                                >
-                                  {liveWarmth.state === "warm" ? "热" : "快冷"}
-                                </span>
-                              )}
-                              <span>{formatRelativeTime(group.rolledLastModifiedAt)}</span>
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent className="space-y-0.5 text-[11px]">
-                            <div>最近活跃：{formatDateTime(group.rolledLastModifiedAt)}</div>
-                            {liveWarmth && (
-                              <div>
-                                已空闲 {formatCompactGap(liveWarmth.idleMs)} · 参考 TTL ~
-                                {formatCompactGap(liveWarmth.refTtlMs)}（
-                                {liveWarmth.state === "warm"
-                                  ? "预计缓存仍热"
-                                  : liveWarmth.state === "borderline"
-                                    ? "临近过期边界"
-                                    : "大概率已冷"}
-                                ）
-                              </div>
-                            )}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TableCell>
-                    </TableRow>
-
-                    {/* 展开后的主会话自身 + 各 Subagent 折叠子行 */}
-                    {hasSub && isExpanded && (
-                      <>
-                        <TableRow className="border-slate-200/40 bg-slate-50/70 text-[11px] dark:border-slate-800/50 dark:bg-slate-900/40">
-                          <TableCell className="w-9 px-1.5 py-1 text-center">
-                            <Button
-                              type="button"
-                              size="xs"
-                              variant="ghost"
-                              aria-label="查看主会话步骤详情"
-                              title="查看步骤详情"
-                              onClick={() => onInspectConversation(root)}
-                              className="h-5 w-6 p-0"
-                            >
-                              <Eye className="size-3" />
-                            </Button>
-                          </TableCell>
-                          <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
-                            {group.siblingRunCount > 1
-                              ? `├─ 最近运行${root.runTitle ? ` · ${root.runTitle}` : ""}`
-                              : "├─ 主会话自身消耗"}
-                          </TableCell>
-                          <TableCell className="py-1 text-slate-400">-</TableCell>
-                          <TableCell
-                            title={root.primaryModel}
-                            className="py-1 text-slate-500 dark:text-slate-400"
+                  return (
+                    <Fragment key={root.conversationId}>
+                      {/* 顶层主会话行（宽松呼吸感，包含全部下属 Subagent 汇总值） */}
+                      <TableRow className="group border-[var(--theme-border)] transition-colors hover:bg-[var(--theme-row-hover)]">
+                        <TableCell className="w-9 px-2 py-2.5 text-center">
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="ghost"
+                            aria-label="查看会话详情"
+                            title="查看会话详情"
+                            onClick={() => onInspectConversation(root)}
+                            className="h-6 w-6 rounded-md p-0 text-[var(--theme-text-muted)] transition-colors group-hover:bg-[var(--theme-surface-elevated)] group-hover:text-[var(--theme-text)]"
                           >
-                            {compactModelName(root.primaryModel)}
-                          </TableCell>
-                          <TableCell className="py-1 text-right text-slate-500 tabular-nums">
-                            {root.callCount}
-                          </TableCell>
-                          <TableCell className="py-1 text-right text-slate-400 tabular-nums">
-                            {formatTokens(root.inputTokens)} / {formatTokens(root.cacheReadTokens)} /{" "}
-                            {formatTokens(root.outputTokens)}
-                          </TableCell>
-                          <TableCell className="py-1 text-right font-medium text-slate-700 tabular-nums dark:text-slate-200">
-                            {formatTokens(root.totalTokens)}
-                          </TableCell>
-                          <TableCell className="py-1 text-right text-slate-600 tabular-nums dark:text-slate-300">
-                            {formatUsd(root.estimatedCostUsd)}
-                          </TableCell>
-                          <TableCell className="py-1 text-right text-slate-400 tabular-nums">
-                            {formatRelativeTime(root.lastModifiedAt)}
-                          </TableCell>
-                        </TableRow>
+                            <Eye className="size-3.5" />
+                          </Button>
+                        </TableCell>
 
-                        {children.map((sub, idx) => {
-                          const branchChar = idx === children.length - 1 ? "└─" : "├─";
-                          const isSubagent = Boolean(sub.parentConversationId);
-                          const subLabel = isSubagent
-                            ? sub.agentName || `子代理 ${sub.conversationId.slice(0, 6)}`
-                            : sub.runTitle || `历史运行 ${formatDateTime(sub.lastModifiedAt).slice(5, 16)}`;
-                          return (
-                            <TableRow
-                              key={sub.conversationId}
-                              className="border-slate-200/40 bg-slate-50/70 text-[11px] dark:border-slate-800/50 dark:bg-slate-900/40"
+                        <TableCell className="max-w-48 py-2.5 lg:max-w-72">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  onClick={() => onInspectConversation(root)}
+                                  className="min-w-0 cursor-pointer truncate text-left font-medium text-[var(--theme-text)] transition-colors hover:text-[var(--theme-accent-ink)]"
+                                >
+                                  {root.title || `会话 ${root.conversationId.slice(0, 8)}`}
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-sm">
+                                {root.firstPromptPreview || "点击查看单步明细"}
+                              </TooltipContent>
+                            </Tooltip>
+                            {hasSub && (
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(root.conversationId)}
+                                aria-expanded={isExpanded}
+                                aria-label={isExpanded ? "收起明细" : "展开明细"}
+                                className="inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-elevated)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--theme-text-secondary)] transition-colors hover:border-[var(--theme-border-strong)] hover:text-[var(--theme-text)]"
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="size-3" />
+                                ) : (
+                                  <ChevronRight className="size-3" />
+                                )}
+                                {group.siblingRunCount > 1 && group.subagentChildCount > 0
+                                  ? `含 ${group.siblingRunCount} 次运行 · ${group.subagentChildCount} 子代理`
+                                  : group.siblingRunCount > 1
+                                    ? `含 ${group.siblingRunCount} 次运行`
+                                    : `含 ${children.length} 子代理`}
+                              </button>
+                            )}
+                            {ctxHealth && ctxHealth.level !== "ok" && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span
+                                    className={`inline-flex shrink-0 cursor-default items-center rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums ${
+                                      ctxHealth.level === "high"
+                                        ? "bg-rose-500/12 text-rose-600 dark:text-rose-300"
+                                        : "bg-amber-500/12 text-amber-700 dark:text-amber-300"
+                                    }`}
+                                  >
+                                    ctx {formatTokens(ctxHealth.used)}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs">
+                                  当前上下文 {formatTokens(ctxHealth.used)}
+                                  {ctxHealth.limit > 0
+                                    ? ` / ${formatTokens(ctxHealth.limit)} (${formatPercent(ctxHealth.ratio)})`
+                                    : ""}
+                                  {ctxHealth.level === "high"
+                                    ? "，会话已偏胖，空闲超 3–5 分钟或偶发驱逐重热代价很高，建议立即 /compact 或开新会话"
+                                    : "，建议本阶段收尾后 /compact 或开新会话"}
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                            {root.archived && (
+                              <Badge
+                                variant="secondary"
+                                className="h-4 shrink-0 rounded px-1.5 text-[10px] text-[var(--theme-text-muted)]"
+                              >
+                                归档
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+
+                        <TableCell className="py-2.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              root.workspaceName &&
+                              onWorkspaceChange(
+                                selectedWorkspace === root.workspaceName ? "" : root.workspaceName
+                              )
+                            }
+                            title={root.workspaceName ? "点击按该项目筛选" : undefined}
+                            className="inline-flex h-5.5 max-w-28 cursor-pointer items-center truncate rounded-md border border-[var(--theme-border)] bg-[var(--theme-surface-elevated)]/60 px-2 text-[11px] font-normal text-[var(--theme-text-secondary)] transition-colors hover:border-[var(--theme-border-strong)] hover:text-[var(--theme-text)]"
+                          >
+                            {root.workspaceName || "临时对话"}
+                          </button>
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-[var(--theme-text-secondary)]">
+                          <span
+                            title={root.primaryModel || "Unknown"}
+                            className="inline-flex items-center gap-1.5 truncate"
+                          >
+                            <span
+                              style={{
+                                backgroundColor: resolveModelStyle(root.primaryModel || "Unknown", 0)
+                                  .color,
+                              }}
+                              className="inline-block size-2 shrink-0 rounded-full"
+                            />
+                            <span className="truncate">{compactModelName(root.primaryModel)}</span>
+                            {group.allModels.length > 1 && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="cursor-default rounded bg-[var(--theme-surface-elevated)] px-1 font-mono text-[10px] text-[var(--theme-text-muted)]">
+                                    +{group.allModels.length - 1}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  涉及模型：{group.allModels.join("、")}
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                          </span>
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-right font-mono text-[var(--theme-text-secondary)] tabular-nums">
+                          {formatExactNumber(group.rolledCallCount)}
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-right font-mono text-[11px] text-[var(--theme-text-muted)] tabular-nums">
+                          {formatTokens(group.rolledInputTokens)} /{" "}
+                          {formatTokens(group.rolledCacheReadTokens)} /{" "}
+                          {formatTokens(group.rolledOutputTokens)}
+                          <span className="ml-1 font-medium text-emerald-600 dark:text-emerald-400">
+                            ({formatPercent(group.rolledCacheHitRate)})
+                          </span>
+                          {rootTtl &&
+                            (rootTtl.lastEventGapMs !== null || rootTtl.maxKeptGapMs !== null) && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span
+                                    className={`ml-1 inline-flex cursor-default items-center rounded px-1 py-0.5 font-mono text-[10px] font-medium ${
+                                      rootTtl.lastEventKind === "expired"
+                                        ? "bg-rose-500/12 text-rose-600 dark:text-rose-300"
+                                        : "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                                    }`}
+                                  >
+                                    {rootTtl.lastEventKind === "expired" &&
+                                    rootTtl.lastEventGapMs !== null
+                                      ? `失效 ${formatCompactGap(rootTtl.lastEventGapMs)}`
+                                      : `保活 ${formatCompactGap(rootTtl.lastEventGapMs ?? rootTtl.maxKeptGapMs)}`}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs space-y-0.5 text-[11px]">
+                                  <div>
+                                    实测样本 {rootTtl.sampleCount} 笔 · 保活≤
+                                    {formatCompactGap(rootTtl.maxKeptGapMs)} · 失效中位{" "}
+                                    {formatCompactGap(
+                                      rootTtl.medianExpiredGapMs ?? rootTtl.minExpiredGapMs
+                                    )}
+                                  </div>
+                                  {rootTtl.lastEventKind && rootTtl.lastEventGapMs !== null && (
+                                    <div className="opacity-85">
+                                      上次事件：
+                                      {rootTtl.lastEventKind === "expired"
+                                        ? `空闲 ${formatCompactGap(rootTtl.lastEventGapMs)} 后缓存失效`
+                                        : `空闲 ${formatCompactGap(rootTtl.lastEventGapMs)} 仍保活`}
+                                      {rootTtl.lastEventAt
+                                        ? `（${formatDateTime(rootTtl.lastEventAt)}）`
+                                        : ""}
+                                    </div>
+                                  )}
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-right font-mono font-semibold text-[var(--theme-text)] tabular-nums">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="cursor-default">
+                                {formatTokens(group.rolledTotalTokens)}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              精确总计: {formatExactNumber(group.rolledTotalTokens)} tokens
+                            </TooltipContent>
+                          </Tooltip>
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-right font-mono font-medium text-[var(--theme-text-secondary)] tabular-nums">
+                          {formatUsd(group.rolledCostUsd)}
+                        </TableCell>
+
+                        <TableCell className="py-2.5 text-right text-[11px] text-[var(--theme-text-muted)] tabular-nums">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex cursor-default items-center gap-1.5">
+                                {liveWarmth && liveWarmth.state !== "cold" && (
+                                  <span
+                                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                      liveWarmth.state === "warm"
+                                        ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                                        : "bg-amber-500/12 text-amber-700 dark:text-amber-300"
+                                    }`}
+                                  >
+                                    {liveWarmth.state === "warm" ? "热" : "快冷"}
+                                  </span>
+                                )}
+                                <span>{formatRelativeTime(group.rolledLastModifiedAt)}</span>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent className="space-y-0.5 text-[11px]">
+                              <div>最近活跃：{formatDateTime(group.rolledLastModifiedAt)}</div>
+                              {liveWarmth && (
+                                <div>
+                                  已空闲 {formatCompactGap(liveWarmth.idleMs)} · 参考 TTL ~
+                                  {formatCompactGap(liveWarmth.refTtlMs)}（
+                                  {liveWarmth.state === "warm"
+                                    ? "预计缓存仍热"
+                                    : liveWarmth.state === "borderline"
+                                      ? "临近过期边界"
+                                      : "大概率已冷"}
+                                  ）
+                                </div>
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+
+                      {/* 展开后的主会话自身 + 各 Subagent 折叠子行 */}
+                      {hasSub && isExpanded && (
+                        <>
+                          <TableRow className="border-[var(--theme-border)]/70 bg-[var(--theme-surface-muted)]/35 text-[11px] hover:bg-[var(--theme-row-hover)]">
+                            <TableCell className="w-9 px-2 py-1.5 text-center">
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant="ghost"
+                                aria-label="查看主会话步骤详情"
+                                title="查看步骤详情"
+                                onClick={() => onInspectConversation(root)}
+                                className="h-5 w-6 p-0 text-[var(--theme-text-muted)] hover:text-[var(--theme-text)]"
+                              >
+                                <Eye className="size-3" />
+                              </Button>
+                            </TableCell>
+                            <TableCell className="max-w-48 truncate py-1.5 pl-5 text-[var(--theme-text-secondary)] lg:max-w-72">
+                              {group.siblingRunCount > 1
+                                ? `├─ 最近运行${root.runTitle ? ` · ${root.runTitle}` : ""}`
+                                : "├─ 主会话自身消耗"}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-[var(--theme-text-muted)]">-</TableCell>
+                            <TableCell
+                              title={root.primaryModel}
+                              className="py-1.5 text-[var(--theme-text-muted)]"
                             >
-                              <TableCell className="w-9 px-1.5 py-1 text-center">
-                                  <Button type="button" size="xs" variant="ghost" aria-label={`查看 ${subLabel} 步骤详情`} title="查看步骤详情" onClick={() => onInspectConversation(sub)} className="h-5 w-6 p-0">
+                              {compactModelName(root.primaryModel)}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                              {root.callCount}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                              {formatTokens(root.inputTokens)} / {formatTokens(root.cacheReadTokens)} /{" "}
+                              {formatTokens(root.outputTokens)}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-right font-mono font-medium text-[var(--theme-text-secondary)] tabular-nums">
+                              {formatTokens(root.totalTokens)}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                              {formatUsd(root.estimatedCostUsd)}
+                            </TableCell>
+                            <TableCell className="py-1.5 text-right text-[var(--theme-text-muted)] tabular-nums">
+                              {formatRelativeTime(root.lastModifiedAt)}
+                            </TableCell>
+                          </TableRow>
+
+                          {children.map((sub, idx) => {
+                            const branchChar = idx === children.length - 1 ? "└─" : "├─";
+                            const isSubagent = Boolean(sub.parentConversationId);
+                            const subLabel = isSubagent
+                              ? sub.agentName || `子代理 ${sub.conversationId.slice(0, 6)}`
+                              : sub.runTitle || `历史运行 ${formatDateTime(sub.lastModifiedAt).slice(5, 16)}`;
+                            return (
+                              <TableRow
+                                key={sub.conversationId}
+                                className="border-[var(--theme-border)]/70 bg-[var(--theme-surface-muted)]/35 text-[11px] hover:bg-[var(--theme-row-hover)]"
+                              >
+                                <TableCell className="w-9 px-2 py-1.5 text-center">
+                                  <Button
+                                    type="button"
+                                    size="xs"
+                                    variant="ghost"
+                                    aria-label={`查看 ${subLabel} 步骤详情`}
+                                    title="查看步骤详情"
+                                    onClick={() => onInspectConversation(sub)}
+                                    className="h-5 w-6 p-0 text-[var(--theme-text-muted)] hover:text-[var(--theme-text)]"
+                                  >
                                     <Eye className="size-3" />
                                   </Button>
                                 </TableCell>
-                                <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
-                                  <span className="inline-flex min-w-0 items-center gap-1">
-                                    <span className="shrink-0 text-slate-400">{branchChar}</span>
+                                <TableCell className="max-w-48 truncate py-1.5 pl-5 text-[var(--theme-text-secondary)] lg:max-w-72">
+                                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                                    <span className="shrink-0 font-mono text-[var(--theme-text-muted)]">
+                                      {branchChar}
+                                    </span>
                                     {isSubagent ? (
                                       <Bot className="size-3 shrink-0 text-violet-500" />
                                     ) : (
                                       <History className="size-3 shrink-0 text-sky-500" />
                                     )}
                                     <span className="truncate">{subLabel}</span>
-                                    <span className="shrink-0 font-mono text-[10px] text-slate-400">({sub.conversationId.slice(0, 6)})</span>
+                                    <span className="shrink-0 font-mono text-[10px] text-[var(--theme-text-muted)]">
+                                      ({sub.conversationId.slice(0, 6)})
+                                    </span>
                                   </span>
                                 </TableCell>
-                                <TableCell className="py-1 text-slate-400">-</TableCell>
-                                <TableCell title={sub.primaryModel} className="py-1 text-slate-500 dark:text-slate-400">{compactModelName(sub.primaryModel)}</TableCell>
-                                <TableCell className="py-1 text-right text-slate-500 tabular-nums">{sub.callCount}</TableCell>
-                                <TableCell className="py-1 text-right text-slate-400 tabular-nums">{formatTokens(sub.inputTokens)} / {formatTokens(sub.cacheReadTokens)} / {formatTokens(sub.outputTokens)}</TableCell>
-                                <TableCell className="py-1 text-right font-medium text-slate-700 tabular-nums dark:text-slate-200">{formatTokens(sub.totalTokens)}</TableCell>
-                                <TableCell className="py-1 text-right text-slate-600 tabular-nums dark:text-slate-300">{formatUsd(sub.estimatedCostUsd)}</TableCell>
-                                <TableCell className="py-1 text-right text-slate-400 tabular-nums">{formatRelativeTime(sub.lastModifiedAt)}</TableCell>
+                                <TableCell className="py-1.5 text-[var(--theme-text-muted)]">-</TableCell>
+                                <TableCell
+                                  title={sub.primaryModel}
+                                  className="py-1.5 text-[var(--theme-text-muted)]"
+                                >
+                                  {compactModelName(sub.primaryModel)}
+                                </TableCell>
+                                <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                                  {sub.callCount}
+                                </TableCell>
+                                <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                                  {formatTokens(sub.inputTokens)} / {formatTokens(sub.cacheReadTokens)} /{" "}
+                                  {formatTokens(sub.outputTokens)}
+                                </TableCell>
+                                <TableCell className="py-1.5 text-right font-mono font-medium text-[var(--theme-text-secondary)] tabular-nums">
+                                  {formatTokens(sub.totalTokens)}
+                                </TableCell>
+                                <TableCell className="py-1.5 text-right font-mono text-[var(--theme-text-muted)] tabular-nums">
+                                  {formatUsd(sub.estimatedCostUsd)}
+                                </TableCell>
+                                <TableCell className="py-1.5 text-right text-[var(--theme-text-muted)] tabular-nums">
+                                  {formatRelativeTime(sub.lastModifiedAt)}
+                                </TableCell>
                               </TableRow>
                             );
                           })}
@@ -678,10 +730,17 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                 })}
               </TableBody>
             </Table>
+          </div>
         )}
         {hiddenRowCount > 0 && (
-          <div className="mt-2 flex justify-center">
-            <Button type="button" variant="outline" size="xs" onClick={() => setShowAllRows(true)} className="h-7 px-3 text-xs">
+          <div className="mt-3 flex justify-center">
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() => setShowAllRows(true)}
+              className="h-8 rounded-lg px-3.5 text-xs"
+            >
               展开剩余 {hiddenRowCount} 条主会话（共 {filteredGroups.length} 条）
             </Button>
           </div>
