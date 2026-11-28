@@ -6,11 +6,13 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
+import zlib from "node:zlib";
 import type {
   ConversationUsageSummary,
   QuotaCycleMode,
@@ -167,7 +169,7 @@ function setCorsHeaders(res: http.ServerResponse, trustedOrigin: string | null):
     res.setHeader("Access-Control-Allow-Origin", trustedOrigin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, If-None-Match");
   }
 }
 
@@ -208,15 +210,38 @@ function sendJson(
   payload: unknown,
   extraHeaders?: Record<string, string>,
   trustedOrigin: string | null = null,
+  req?: http.IncomingMessage,
+  enableEtag = false,
 ): void {
-  // 0. 序列化响应体并注入统一头信息
+  // 0. 序列化响应体，按需执行 ETag 304 短路与大载荷（>=16KB）快速 gzip 压缩
   const body = JSON.stringify(payload);
   setCorsHeaders(res, trustedOrigin);
-  res.writeHead(statusCode, {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json; charset=utf-8",
     ...extraHeaders,
-  });
+  };
+  if (enableEtag && statusCode === 200) {
+    const etag = `"${crypto.createHash("sha1").update(body).digest("base64url")}"`;
+    headers.ETag = etag;
+    headers["Cache-Control"] = "no-cache";
+    const inm = String(req?.headers["if-none-match"] || "").trim();
+    if (inm === etag || inm === `W/${etag}`) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+  }
+  const acceptEnc = String(req?.headers["accept-encoding"] || "");
+  if (body.length >= 16_384 && /\bgzip\b/i.test(acceptEnc)) {
+    const gz = zlib.gzipSync(body, { level: 1 });
+    headers["Content-Encoding"] = "gzip";
+    headers.Vary = trustedOrigin ? "Origin, Accept-Encoding" : "Accept-Encoding";
+    res.writeHead(statusCode, headers);
+    res.end(gz);
+    return;
+  }
   // 1.1. 输出 UTF-8 JSON 正文并结束响应
+  res.writeHead(statusCode, headers);
   res.end(body);
 }
 
@@ -247,12 +272,19 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
   const rawSearch = url.searchParams.get("search")?.trim();
   const search = rawSearch ? rawSearch : undefined;
 
+  const rawSource = url.searchParams.get("source")?.trim();
+  const source = rawSource ? rawSource : undefined;
+
   // 1.2. 解析归档会话开关（默认 true）与强制刷新标志
   const includeArchived = url.searchParams.get("includeArchived") !== "false";
   const rawRefresh = url.searchParams.get("refresh");
   const forceRefresh = rawRefresh === "1" || rawRefresh === "true";
+  const rawNodeLimit = url.searchParams.get("nodeLimit");
+  const parsedLimit = rawNodeLimit !== null && rawNodeLimit !== "" ? Number(rawNodeLimit) : NaN;
+  const nodeLimit = Number.isFinite(parsedLimit) && parsedLimit >= 0 ? Math.min(5000, Math.floor(parsedLimit)) : undefined;
 
   return {
+    ...(source ? { source } : {}),
     ...(cycle ? { cycle } : {}),
     days,
     workspace,
@@ -260,6 +292,7 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
     search,
     includeArchived,
     forceRefresh,
+    ...(nodeLimit !== undefined ? { nodeLimit } : {}),
   };
 }
 
@@ -457,10 +490,11 @@ export function createTelemetryHttpServer(
 
       const replyJson = (statusCode: number, payload: unknown, extraHeaders?: Record<string, string>) =>
         sendJson(res, statusCode, payload, extraHeaders, trustedOrigin);
+      const sourceParam = url.searchParams.get("source")?.trim() || undefined;
 
       // 1.1.1. 配额重置记录读写接口（GET / POST / DELETE /api/resets）
       if (pathname === "/api/resets" && req.method === "GET") {
-        replyJson(200, { resets: provider.getResets ? provider.getResets() : [] });
+        replyJson(200, { resets: provider.getResets ? provider.getResets(sourceParam) : [] });
         return;
       }
       if (pathname === "/api/resets" && req.method === "POST") {
@@ -477,7 +511,7 @@ export function createTelemetryHttpServer(
             return;
           }
           const note = typeof body.note === "string" ? body.note : "";
-          const resets = provider.addReset({ timestamp, pool: rawPool, note });
+          const resets = provider.addReset({ timestamp, pool: rawPool, note }, sourceParam);
           replyJson(201, { resets });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "参数不合法" });
@@ -495,7 +529,7 @@ export function createTelemetryHttpServer(
           return;
         }
         try {
-          const resets = provider.deleteReset(decodeURIComponent(rawId));
+          const resets = provider.deleteReset(decodeURIComponent(rawId), sourceParam);
           replyJson(200, { resets });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "删除重置记录失败" });
@@ -506,7 +540,7 @@ export function createTelemetryHttpServer(
       // 1.1.2. 周配额剩余%校准读写接口（GET / POST / DELETE /api/calibrations）
       if (pathname === "/api/calibrations" && req.method === "GET") {
         if (provider.getCalibrationsState) {
-          const state = provider.getCalibrationsState();
+          const state = provider.getCalibrationsState(sourceParam);
           if (!state.ok) {
             replyJson(500, { error: state.error, corrupted: true });
             return;
@@ -515,8 +549,8 @@ export function createTelemetryHttpServer(
           return;
         }
         replyJson(200, {
-          calibrations: provider.getCalibrations ? provider.getCalibrations() : {},
-          initialized: provider.isCalibrationsInitialized ? provider.isCalibrationsInitialized() : false,
+          calibrations: provider.getCalibrations ? provider.getCalibrations(sourceParam) : {},
+          initialized: provider.isCalibrationsInitialized ? provider.isCalibrationsInitialized(sourceParam) : false,
         });
         return;
       }
@@ -540,7 +574,8 @@ export function createTelemetryHttpServer(
               body.batch as Record<
                 string,
                 { remainingPct: number; calibratedCostUsd: number; calibratedTokens: number; calibratedAt: string }
-              >
+              >,
+              sourceParam
             );
             if (res.conflict) {
               replyJson(409, { calibrations: res.calibrations, initialized: true, alreadyInitialized: true });
@@ -572,7 +607,8 @@ export function createTelemetryHttpServer(
               calibratedTokens: body.calibratedTokens as number,
               calibratedAt,
             },
-            { source }
+            { source },
+            sourceParam
           );
           replyJson(200, { calibrations, initialized: true });
         } catch (err) {
@@ -588,7 +624,7 @@ export function createTelemetryHttpServer(
         try {
           const key = url.searchParams.get("key")?.trim() ?? "";
           const atParam = url.searchParams.get("at")?.trim();
-          const calibrations = provider.deleteCalibration(key, atParam || undefined);
+          const calibrations = provider.deleteCalibration(key, atParam || undefined, sourceParam);
           replyJson(200, { calibrations });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "删除周校准失败" });
@@ -658,23 +694,32 @@ export function createTelemetryHttpServer(
         return;
       }
 
-      // 1.2. 健康检查与汇总查询路由
+      // 1.2. 健康检查、数据源列表与汇总查询路由
       if (pathname === "/api/health") {
-        replyJson(200, provider.getHealth());
+        replyJson(200, provider.getHealth(sourceParam));
+        return;
+      }
+
+      if (pathname === "/api/sources") {
+        replyJson(200, { sources: provider.getSources ? provider.getSources() : [] });
         return;
       }
 
       if (pathname === "/api/summary") {
         const filters = parseSummaryQuery(url);
-        replyJson(
+        sendJson(
+          res,
           200,
           provider.getSummary(filters),
-          buildId ? { "X-Hamiji-Build": buildId } : undefined
+          buildId ? { "X-Hamiji-Build": buildId } : undefined,
+          trustedOrigin,
+          req,
+          true
         );
         return;
       }
 
-      // 1.3. 单会话详情路由（支持 URL 编码 ID）
+      // 1.3. 单会话详情路由（支持 URL 编码 ID 与可选 source 过滤）
       if (pathname.startsWith("/api/conversations/")) {
         const rawId = pathname.slice("/api/conversations/".length);
         if (!rawId || rawId.includes("/")) {
@@ -682,7 +727,7 @@ export function createTelemetryHttpServer(
           return;
         }
         const conversationId = decodeURIComponent(rawId);
-        const detail = provider.getConversationDetail(conversationId);
+        const detail = provider.getConversationDetail(conversationId, sourceParam);
         if (!detail) {
           replyJson(404, { error: "Conversation not found" });
           return;

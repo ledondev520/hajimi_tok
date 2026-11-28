@@ -16,7 +16,7 @@ import {
   Sun,
   Trash2,
 } from "lucide-react";
-import type { QuotaResetEvent } from "@/types/telemetry";
+import type { DataSourceInfo, QuotaResetEvent } from "@/types/telemetry";
 import {
   buildResetCalendarItems,
   formatCycleCountdown,
@@ -70,6 +70,15 @@ export function ResetCalendarPage() {
       return "light";
     }
   });
+  const [sources, setSources] = useState<DataSourceInfo[]>([]);
+  const [activeSource, setActiveSource] = useState<string>(() => {
+    try {
+      const raw = new URLSearchParams(window.location.search).get("source")?.trim() || "";
+      return raw && raw !== "all" ? raw : "";
+    } catch {
+      return "";
+    }
+  });
   const [resets, setResets] = useState<QuotaResetEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -86,6 +95,24 @@ export function ResetCalendarPage() {
   });
   const [inputPool, setInputPool] = useState<QuotaResetEvent["pool"]>("all");
   const [inputNote, setInputNote] = useState("");
+  const sourceQuery = activeSource ? `?source=${encodeURIComponent(activeSource)}` : "";
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/sources")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sources?: DataSourceInfo[] } | null) => {
+        if (cancelled || !data?.sources) return;
+        setSources(data.sources);
+        if (!activeSource && data.sources.length > 1) {
+          setActiveSource(data.sources[0].id);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     document.title = "哈吉米统计 · 重置日历";
@@ -99,7 +126,7 @@ export function ResetCalendarPage() {
 
   const loadResets = useCallback(async () => {
     try {
-      const res = await fetch("/api/resets");
+      const res = await fetch(`/api/resets${sourceQuery}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { resets?: QuotaResetEvent[] };
       setResets(Array.isArray(data.resets) ? data.resets : []);
@@ -109,7 +136,7 @@ export function ResetCalendarPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sourceQuery]);
 
   useEffect(() => {
     void loadResets();
@@ -125,7 +152,7 @@ export function ResetCalendarPage() {
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      const res = await fetch("/api/resets", {
+      const res = await fetch(`/api/resets${sourceQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -149,7 +176,9 @@ export function ResetCalendarPage() {
 
   const handleDeleteReset = async (id: string) => {
     try {
-      const res = await fetch(`/api/resets/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await fetch(`/api/resets/${encodeURIComponent(id)}${sourceQuery}`, {
+        method: "DELETE",
+      });
       const data = (await res.json()) as { resets?: QuotaResetEvent[]; error?: string };
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setResets(Array.isArray(data.resets) ? data.resets : []);
@@ -216,13 +245,40 @@ export function ResetCalendarPage() {
   return (
     <TooltipProvider delayDuration={120}>
       <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
-        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white/95 shadow-2xs backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/90">
+        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white shadow-2xs dark:border-slate-800/80 dark:bg-slate-950">
           <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-2.5 sm:px-5">
             <div className="flex items-center gap-2.5">
               <div className="flex size-6 items-center justify-center rounded-md bg-indigo-600 text-white">
                 <Activity className="size-3.5" />
               </div>
               <h1 className="text-sm font-semibold tracking-tight">重置日历</h1>
+              {sources.length > 1 && (
+                <Select
+                  value={activeSource || sources[0].id}
+                  onValueChange={(next) => {
+                    setActiveSource(next);
+                    setLoading(true);
+                    const url = new URL(window.location.href);
+                    url.searchParams.set("source", next);
+                    window.history.replaceState(null, "", url.toString());
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label="切换重置日历账号"
+                    size="sm"
+                    className="h-6 min-w-[108px] px-2 text-[11px]"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sources.map((src) => (
+                      <SelectItem key={src.id} value={src.id}>
+                        {src.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               <Button variant="outline" size="xs" asChild className="h-6 px-2 text-[11px]">
                 <a href="/">
                   <ArrowLeft className="size-3" />

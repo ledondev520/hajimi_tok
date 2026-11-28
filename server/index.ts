@@ -1,6 +1,6 @@
 /**
- * Input: node:os、node:path、./aggregator 的 createTelemetryService 与 ./app 的 createTelemetryHttpServer / resolveUpdateServiceAction。
- * Output: 启动本地只读 HTTP API 与生产态静态页面常驻托管服务（同时监听 IPv4/IPv6 loopback 4318 与备用 5173，含静默自更新与可选 agy 官方配额定时刷新）。
+ * Input: node:os、node:path、./multiSource 的 createMultiSourceTelemetryService 与 ./app 的 createTelemetryHttpServer / resolveUpdateServiceAction。
+ * Output: 启动本地只读 HTTP API 与生产态静态页面常驻托管服务（同时监听 IPv4/IPv6 loopback 4318 与备用 5173，自动兼容 T3 Code 多账号，含静默自更新与可选 agy 官方配额定时刷新）。
  * Pos: 服务端主进程启动入口（launchd 常驻服务 / npm start / npm run dev 后端子进程）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -9,7 +9,7 @@ import fs from "node:fs";
 import type { Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { createTelemetryService } from "./aggregator";
+import { createMultiSourceTelemetryService } from "./multiSource";
 import { createTelemetryHttpServer, resolveUpdateServiceAction } from "./app";
 
 const PORT = Number(process.env.PORT || 4318); // 主 HTTP 监听端口
@@ -203,8 +203,8 @@ function listenOptionalMirror(factory: () => Server, port: number, host: string)
  * 参数：无（读取环境变量 PORT、HOST、AGY_DATA_DIR）。
  */
 function bootstrapServer(): void {
-  // 0. 组装聚合服务与 HTTP 路由实例工厂
-  const provider = createTelemetryService(process.env.AGY_DATA_DIR);
+  // 0. 组装多数据源聚合服务与 HTTP 路由实例工厂（自动发现原生 + T3 Code 隔离账号目录）
+  const provider = createMultiSourceTelemetryService(process.env.AGY_DATA_DIR);
   const makeServer = () => createTelemetryHttpServer(provider, { staticDir: STATIC_DIR });
   const servers: Server[] = [];
 
@@ -214,8 +214,12 @@ function bootstrapServer(): void {
   primary.listen(PORT, HOST, () => {
     confirmAppliedUpdateState();
     const health = provider.getHealth();
+    const sources = provider.getSources?.() ?? [];
     console.log(`[AntiGravity Token Radar] Local server listening at http://${HOST}:${PORT} (and http://localhost:${PORT})`);
     console.log(`[AntiGravity Token Radar] Data source: ${health.dataDir} (convs=${health.conversationDbCount}, transcripts=${health.transcriptCount})`);
+    if (sources.length > 1) {
+      console.log(`[AntiGravity Token Radar] Sources: ${sources.map((s) => `${s.label}(${s.id})`).join(", ")}`);
+    }
   });
 
   if (HOST === "127.0.0.1") {

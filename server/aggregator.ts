@@ -41,6 +41,7 @@ import {
 export { matchesModelQuery, resolveQuotaCycleBlocks };
 
 const MAX_CALL_TIMELINE_NODES = 5000; // 折线图返回的调用节点上限，确保几千轮长程工作也能完整查看全量节点曲线
+const RAW_TTL_CACHE = new WeakMap<StepUsageRecord[], ReturnType<typeof analyzeStepCacheTtl>>(); // 按会话原始步骤引用缓存 TTL 解析结果
 
 const BUCKET_KEY_CACHE = new Map<
   number,
@@ -191,10 +192,12 @@ function projectConversationSteps(
 /** createTelemetryService 可选隔离与存储配置（解耦生产自定义数据目录与单测隔离） */
 export interface TelemetryServiceOptions {
   isolated?: boolean; // 单测隔离模式：不读取宿主机默认 resets / calibrations / env 锚点 / live-quota
-  resetsPath?: string; // 可选自定义 resets.json 路径
+  resetsPath?: string | null; // 可选自定义 resets.json 路径（null 表示仅读公共重置）
+  sharedResetsPath?: string; // 可选公共强制重置种子文件路径（多账号模式下显式透传仓库 shared-resets.json）
   calibrationsPath?: string; // 可选自定义 calibrations.json 路径
   liveQuotaPath?: string; // 可选自定义 live-quota.json 路径
   useEnvAnchors?: boolean; // 是否读取环境变量锚点（默认非隔离态启用）
+  scanner?: ReturnType<typeof createTelemetryScanner>; // 可选外部注入扫描器（供多源聚合复用缓存避免重复扫盘）
 }
 
 /**
@@ -221,9 +224,11 @@ export function createTelemetryService(
   const isolated = Boolean(serviceOpts.isolated);
   const useEnvAnchors = serviceOpts.useEnvAnchors ?? !isolated;
   const pricing = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效费率配置
-  const scanner = createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
+  const scanner = serviceOpts.scanner ?? createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
   const resetStore =
-    !isolated || serviceOpts.resetsPath ? createResetStore(serviceOpts.resetsPath) : null;
+    !isolated || serviceOpts.resetsPath || serviceOpts.sharedResetsPath
+      ? createResetStore(serviceOpts.resetsPath, serviceOpts.sharedResetsPath)
+      : null;
   const calibrationStore =
     !isolated || serviceOpts.calibrationsPath
       ? createCalibrationStore(serviceOpts.calibrationsPath)
@@ -260,6 +265,7 @@ export function createTelemetryService(
         modelQuery,
         q,
         includeArchived,
+        options.nodeLimit ?? -1,
         options.nowMs ?? 0,
         resetsSig,
       ]);
@@ -372,7 +378,7 @@ export function createTelemetryService(
 
       let subagentCount = 0, callCount = 0, inputTokens = 0, cacheReadTokens = 0, outputTokens = 0;
       let thinkingTokens = 0, responseTokens = 0, latencySum = 0, estimatedCostUsd = 0, cacheSavedUsd = 0;
-      let todayTotalTokens = 0, todayEstimatedCostUsd = 0;
+      let todayTotalTokens = 0, todayEstimatedCostUsd = 0, todayCallCount = 0;
       let timedCalls = 0, ttftSum = 0, timedOut = 0, timedLatMs = 0, streamOut = 0, streamMs = 0;
 
       for (const conv of filtered) {
@@ -408,7 +414,8 @@ export function createTelemetryService(
         // 2.1.1. 基于会话未过滤原始步序判定缓存 TTL（避免筛选单模型后把隔着模型切换的两步误判为连续），再按当前视图过滤观测样本
         const rawConv = allById.get(conv.conversationId) ?? conv;
         if (rawConv.steps.length >= 2) {
-          const ttlRes = analyzeStepCacheTtl(rawConv.steps, false);
+          let ttlRes = RAW_TTL_CACHE.get(rawConv.steps);
+          if (!ttlRes) { ttlRes = analyzeStepCacheTtl(rawConv.steps, false); RAW_TTL_CACHE.set(rawConv.steps, ttlRes); }
           const matchedObs = ttlRes.observations.filter((obs) => {
             const mName = obs.modelName ?? "";
             const mId = obs.modelId ?? "";
@@ -442,6 +449,7 @@ export function createTelemetryService(
           });
           const bk = toLocalBucketKeys(safeTsMs);
           if (bk.dayKey === todayKey) {
+            todayCallCount++;
             todayTotalTokens += s.totalTokens;
             todayEstimatedCostUsd += s.estimatedCostUsd;
           }
@@ -585,49 +593,57 @@ export function createTelemetryService(
           return ttl ? { ...stripped, cacheTtl: ttl } : stripped;
         });
 
-      // 3.1. 按时间升序生成逐次调用增量节点序列（保留实际会话/子代理身份与所属主会话身份）
-      rawStepEntries.sort((a, b) => {
-        if (a.tsMs !== b.tsMs) return a.tsMs - b.tsMs;
-        if (a.conv.conversationId !== b.conv.conversationId) {
-          return a.conv.conversationId.localeCompare(b.conv.conversationId);
+      // 3.1. 按时间升序生成逐次调用增量节点序列（nodeLimit=0 跳过构造；正数时至少保留全部今日节点避免「今日」图表截断）
+      let callTimeline: CallNodePoint[] = [];
+      if (options.nodeLimit !== 0) {
+        rawStepEntries.sort((a, b) => {
+          if (a.tsMs !== b.tsMs) return a.tsMs - b.tsMs;
+          if (a.conv.conversationId !== b.conv.conversationId) {
+            return a.conv.conversationId.localeCompare(b.conv.conversationId);
+          }
+          return a.step.callIndex - b.step.callIndex;
+        });
+        const effLimit =
+          options.nodeLimit && options.nodeLimit > 0
+            ? Math.min(MAX_CALL_TIMELINE_NODES, Math.max(options.nodeLimit, todayCallCount))
+            : MAX_CALL_TIMELINE_NODES;
+        const sliceStart = Math.max(0, rawStepEntries.length - effLimit);
+        let runningAllTokens = 0;
+        const runningByFamily = new Map<string, number>();
+        for (let idx = 0; idx < rawStepEntries.length; idx++) {
+          const { conv, rootConv, step } = rawStepEntries[idx];
+          const modelLabel = step.modelName || "Unknown Model";
+          const familyKey = modelLabel.replace(/\s*\([^)]*\)\s*$/g, "").trim().toLowerCase();
+          runningAllTokens += step.totalTokens;
+          const nextModelCum = (runningByFamily.get(familyKey) ?? 0) + step.totalTokens;
+          runningByFamily.set(familyKey, nextModelCum);
+          if (idx < sliceStart) continue;
+          const outputTps =
+            step.latencyMs > 0 && step.outputTokens > 0
+              ? Number((step.outputTokens / (step.latencyMs / 1000)).toFixed(1))
+              : 0;
+          callTimeline.push({
+            seq: idx + 1,
+            conversationId: conv.conversationId,
+            conversationTitle: conv.title || `会话 ${conv.conversationId.slice(0, 8)}`,
+            rootConversationId: rootConv.conversationId,
+            rootConversationTitle: rootConv.title || `会话 ${rootConv.conversationId.slice(0, 8)}`,
+            callIndex: step.callIndex,
+            timestamp: step.timestamp,
+            modelName: modelLabel,
+            inputTokens: step.inputTokens,
+            cacheReadTokens: step.cacheReadTokens,
+            outputTokens: step.outputTokens,
+            totalTokens: step.totalTokens,
+            cumulativeTokens: runningAllTokens,
+            modelCumulativeTokens: nextModelCum,
+            latencyMs: step.latencyMs,
+            ttftMs: step.ttftMs,
+            outputTps,
+            estimatedCostUsd: step.estimatedCostUsd,
+          });
         }
-        return a.step.callIndex - b.step.callIndex;
-      });
-
-      let runningAllTokens = 0;
-      const runningByFamily = new Map<string, number>();
-      const allCallNodes: CallNodePoint[] = rawStepEntries.map(({ conv, rootConv, step }, idx) => {
-        const modelLabel = step.modelName || "Unknown Model";
-        const familyKey = modelLabel.replace(/\s*\([^)]*\)\s*$/g, "").trim().toLowerCase();
-        runningAllTokens += step.totalTokens;
-        const nextModelCum = (runningByFamily.get(familyKey) ?? 0) + step.totalTokens;
-        runningByFamily.set(familyKey, nextModelCum);
-        const outputTps =
-          step.latencyMs > 0 && step.outputTokens > 0
-            ? Number((step.outputTokens / (step.latencyMs / 1000)).toFixed(1))
-            : 0;
-        return {
-          seq: idx + 1,
-          conversationId: conv.conversationId,
-          conversationTitle: conv.title || `会话 ${conv.conversationId.slice(0, 8)}`,
-          rootConversationId: rootConv.conversationId,
-          rootConversationTitle: rootConv.title || `会话 ${rootConv.conversationId.slice(0, 8)}`,
-          callIndex: step.callIndex,
-          timestamp: step.timestamp,
-          modelName: modelLabel,
-          inputTokens: step.inputTokens,
-          cacheReadTokens: step.cacheReadTokens,
-          outputTokens: step.outputTokens,
-          totalTokens: step.totalTokens,
-          cumulativeTokens: runningAllTokens,
-          modelCumulativeTokens: nextModelCum,
-          latencyMs: step.latencyMs,
-          ttftMs: step.ttftMs,
-          outputTps,
-          estimatedCostUsd: step.estimatedCostUsd,
-        };
-      });
-      const callTimeline = allCallNodes.slice(-MAX_CALL_TIMELINE_NODES);
+      }
 
       // 3.2. 读取官方 statusLine 实时周剩余快照，并在服务端对齐“采样时刻的整池累计消耗”作为校准分母
       const rawLiveQuota =

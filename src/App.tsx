@@ -28,6 +28,7 @@ import {
 } from "@/components/ConversationExplorer";
 import { ConversationDetailDialog } from "@/components/ConversationDetailDialog";
 import { ResetCalendarPage } from "@/components/ResetCalendarPage";
+import { SourceSwitcherBar } from "@/components/SourceSwitcherBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -194,12 +195,15 @@ export function App() {
   const initViewPrefs = useMemo(
     () =>
       readStoredJson<{
+        selectedSource?: string;
         selectedModel?: string;
         selectedWorkspace?: string;
         chartWindow?: NodeWindowKey;
       }>("agy_dashboard_view_prefs_v1", {}),
     []
   );
+  const [selectedSource, setSelectedSource] = useState<string>(initViewPrefs.selectedSource ?? "all");
+  const [appliedSource, setAppliedSource] = useState<string>(initViewPrefs.selectedSource ?? "all");
   const [cycle, setCycle] = useState<QuotaCycleMode>(resolveInitialCycle);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
   const [appliedWorkspace, setAppliedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
@@ -219,9 +223,11 @@ export function App() {
   );
   const [hoveredNodeSeq, setHoveredNodeSeq] = useState<number | null>(null);
   const summaryCacheRef = useRef<Map<string, DashboardSummaryPayload>>(new Map()); // 前端切池瞬显缓存（SWR）
+  const etagCacheRef = useRef<Map<string, string>>(new Map()); // 前端 ETag 缓存，数据未变时 304 零重绘
   const abortRef = useRef<AbortController | null>(null); // 取消过期在途请求，防止慢响应反覆盖新切池
   const requestSeqRef = useRef(0); // 单调请求序号，保证竞态下仅采纳最新响应
   const buildIdRef = useRef<string>(""); // 记录当前前端构建指纹，后台静默更新重启后自动无感重载页面
+  const nodeLimitParam = chartWindow === "all" ? "" : "300"; // 非「全部」节点模式按需拉取尾部与今日节点，减负 90%+ 载荷
 
   // 0.1. 同步主题与周期偏好至 documentElement / localStorage
   useEffect(() => {
@@ -243,11 +249,12 @@ export function App() {
 
   useEffect(() => {
     writeStoredJson("agy_dashboard_view_prefs_v1", {
+      selectedSource,
       selectedModel,
       selectedWorkspace,
       chartWindow,
     });
-  }, [selectedModel, selectedWorkspace, chartWindow]);
+  }, [selectedSource, selectedModel, selectedWorkspace, chartWindow]);
 
   /**
    * 职责：向本地只读服务请求会话 Token 汇总数据。
@@ -256,16 +263,15 @@ export function App() {
   const fetchSummary = useCallback(
     async (forceRefresh = false) => {
       // 1.1. 命中前端缓存时先瞬显旧快照，同时取消过期请求并在后台静默拉新
-      const cacheKey = `${cycle}|${selectedWorkspace}|${selectedModel}`;
-      if (!forceRefresh) {
-        const cached = summaryCacheRef.current.get(cacheKey);
-        if (cached) {
-          startTransition(() => {
-            setSummary(cached);
-            setAppliedModel(selectedModel);
-            setAppliedWorkspace(selectedWorkspace);
-          });
-        }
+      const cacheKey = `${selectedSource}|${cycle}|${selectedWorkspace}|${selectedModel}|${nodeLimitParam}`;
+      const cached = !forceRefresh ? summaryCacheRef.current.get(cacheKey) : undefined;
+      if (cached) {
+        startTransition(() => {
+          setSummary(cached);
+          setAppliedSource(cached.activeSource ?? selectedSource);
+          setAppliedModel(selectedModel);
+          setAppliedWorkspace(selectedWorkspace);
+        });
       }
 
       abortRef.current?.abort();
@@ -275,17 +281,18 @@ export function App() {
 
       try {
         const params = new URLSearchParams();
+        if (selectedSource) params.set("source", selectedSource);
         params.set("cycle", cycle);
         if (selectedWorkspace) params.set("workspace", selectedWorkspace);
         if (selectedModel) params.set("model", selectedModel);
+        if (nodeLimitParam) params.set("nodeLimit", nodeLimitParam);
         if (forceRefresh) params.set("refresh", "1");
 
+        const savedEtag = cached ? etagCacheRef.current.get(cacheKey) : undefined;
         const res = await fetch(`/api/summary?${params.toString()}`, {
           signal: controller.signal,
+          ...(savedEtag ? { headers: { "If-None-Match": savedEtag } } : {}),
         });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
         const nextBuildId = res.headers.get("X-Hamiji-Build") || "";
         if (nextBuildId) {
           if (buildIdRef.current && buildIdRef.current !== nextBuildId) {
@@ -298,15 +305,32 @@ export function App() {
             buildIdRef.current = nextBuildId;
           }
         }
+        if (res.status === 304) {
+          if (reqSeq === requestSeqRef.current) setError(null);
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
         const data = (await res.json()) as DashboardSummaryPayload;
         if (reqSeq !== requestSeqRef.current) return;
+        const resolvedSource = data.activeSource ?? selectedSource;
+        const nextEtag = res.headers.get("ETag");
+        if (nextEtag) etagCacheRef.current.set(cacheKey, nextEtag);
         summaryCacheRef.current.set(cacheKey, data);
-        if (summaryCacheRef.current.size > 16) {
+        if (summaryCacheRef.current.size > 24) {
           const oldest = summaryCacheRef.current.keys().next().value;
-          if (oldest !== undefined) summaryCacheRef.current.delete(oldest);
+          if (oldest !== undefined) {
+            summaryCacheRef.current.delete(oldest);
+            etagCacheRef.current.delete(oldest);
+          }
         }
         startTransition(() => {
           setSummary(data);
+          setAppliedSource(resolvedSource);
+          if (data.activeSource && data.activeSource !== selectedSource) {
+            setSelectedSource(data.activeSource);
+          }
           setAppliedModel(selectedModel);
           setAppliedWorkspace(selectedWorkspace);
         });
@@ -321,10 +345,10 @@ export function App() {
         }
       }
     },
-    [cycle, selectedWorkspace, selectedModel]
+    [selectedSource, cycle, selectedWorkspace, selectedModel, nodeLimitParam]
   );
 
-  // 1.2. 筛选条件变化时立即拉取；仅在前台可见时 5 秒轮询，切回标签页瞬时刷新避免后台空转
+  // 1.2. 筛选条件变化时立即拉取；仅在前台可见时 10 秒轮询（命中 ETag 304 零重绘），切回标签页瞬时刷新
   useEffect(() => {
     void fetchSummary(false);
     return () => {
@@ -337,7 +361,7 @@ export function App() {
       if (document.visibilityState === "visible") {
         void fetchSummary(false);
       }
-    }, 5000);
+    }, 10_000);
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         void fetchSummary(false);
@@ -355,22 +379,26 @@ export function App() {
   useEffect(() => {
     if (!hasSummary) return;
     const targets = ["", "pool:claude", "pool:gemini"].filter(
-      (m) => m !== selectedModel && !summaryCacheRef.current.has(`${cycle}|${selectedWorkspace}|${m}`)
+      (m) => m !== selectedModel && !summaryCacheRef.current.has(`${selectedSource}|${cycle}|${selectedWorkspace}|${m}|${nodeLimitParam}`)
     );
     if (targets.length === 0) return;
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       for (const m of targets) {
         if (cancelled || document.visibilityState !== "visible") return;
-        const key = `${cycle}|${selectedWorkspace}|${m}`;
+        const key = `${selectedSource}|${cycle}|${selectedWorkspace}|${m}|${nodeLimitParam}`;
         if (summaryCacheRef.current.has(key)) continue;
         try {
           const params = new URLSearchParams({ cycle });
+          if (selectedSource) params.set("source", selectedSource);
           if (selectedWorkspace) params.set("workspace", selectedWorkspace);
           if (m) params.set("model", m);
+          if (nodeLimitParam) params.set("nodeLimit", nodeLimitParam);
           const res = await fetch(`/api/summary?${params.toString()}`);
           if (!res.ok || cancelled) continue;
+          const etag = res.headers.get("ETag");
           const data = (await res.json()) as DashboardSummaryPayload;
+          if (etag) etagCacheRef.current.set(key, etag);
           summaryCacheRef.current.set(key, data);
         } catch {
           /* 预热失败静默忽略 */
@@ -381,7 +409,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [hasSummary, cycle, selectedWorkspace, selectedModel]);
+  }, [hasSummary, selectedSource, cycle, selectedWorkspace, selectedModel, nodeLimitParam]);
 
   // 1.3. 根据本机已扫描到的全部模型动态生成顶栏快捷切换按钮（新用 Sonnet 5.5 等会自动长出新按钮）
   const modelShortcuts = useMemo(
@@ -432,20 +460,20 @@ export function App() {
     [modelShortcuts, appliedModel]
   );
 
-  /**
-   * 职责：打开指定会话的单步 Token 明细弹窗。
-   * 参数：conv — 被点击的会话汇总项。
-   */
-  const handleInspectConversation = (conv: ConversationUsageSummary) => {
-    // 2.1. 记录目标会话 ID 触发 Dialog 打开
+  const handleInspectConversation = useCallback((conv: ConversationUsageSummary) => {
     setActiveConvId(conv.conversationId);
-  };
+  }, []);
+
+  const handleSelectSource = useCallback((nextSource: string) => {
+    setSelectedSource(nextSource);
+    setSelectedWorkspace("");
+  }, []);
 
   return (
     <TooltipProvider delayDuration={150}>
       <div className="min-h-screen bg-slate-50 text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-50">
-        {/* 极简单行顶栏（桌面端一字排开，窄屏自动折行；昼夜与日历收纳为纯图标按钮） */}
-        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white/95 shadow-2xs backdrop-blur-md dark:border-slate-800/80 dark:bg-slate-950/90">
+        {/* 极简单行顶栏（实心背景免移动端粘性滚动重绘卡顿） */}
+        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white shadow-2xs dark:border-slate-800/80 dark:bg-slate-950">
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-5">
             <div className="flex flex-wrap items-center gap-2.5">
               <div className="flex shrink-0 items-center gap-2">
@@ -477,7 +505,7 @@ export function App() {
                           >
                             <span>{item.label}</span>
                             {item.hotkey && (
-                              <kbd className="rounded bg-slate-200/70 px-1 font-mono text-[10px] leading-4 text-slate-500 dark:bg-slate-700/70 dark:text-slate-400">
+                              <kbd className="hidden rounded bg-slate-200/70 px-1 font-mono text-[10px] leading-4 text-slate-500 sm:inline dark:bg-slate-700/70 dark:text-slate-400">
                                 {item.hotkey}
                               </kbd>
                             )}
@@ -559,6 +587,7 @@ export function App() {
               })()}
 
               {summary?.quotaWindow &&
+                !(summary.sources && summary.sources.length > 1 && appliedSource === "all") &&
                 summary.quotaWindow.mode !== "all" &&
                 (summary.quotaWindow.isIdleReset || summary.quotaWindow.resetsInMs > 0) && (
                   <Tooltip>
@@ -595,7 +624,11 @@ export function App() {
                     className="h-7 w-7 p-0 text-slate-700 dark:text-slate-200"
                   >
                     <a
-                      href="/calendar"
+                      href={
+                        selectedSource && selectedSource !== "all"
+                          ? `/calendar?source=${encodeURIComponent(selectedSource)}`
+                          : "/calendar"
+                      }
                       target="_blank"
                       rel="noopener noreferrer"
                       aria-label="打开重置日历与登记页"
@@ -653,7 +686,16 @@ export function App() {
             </div>
           ) : summary ? (
             <>
+              {summary.sources && summary.sources.length > 1 && (
+                <SourceSwitcherBar
+                  sources={summary.sources}
+                  activeSource={selectedSource}
+                  onSelectSource={handleSelectSource}
+                />
+              )}
               <KpiCards
+                key={appliedSource || "all"}
+                activeSource={appliedSource}
                 totals={summary.totals}
                 byModel={summary.byModel}
                 mainConversationCount={mainConvCount}
@@ -670,6 +712,8 @@ export function App() {
                 isWorkspaceFiltered={
                   Boolean(selectedWorkspace || appliedWorkspace) ||
                   selectedModel !== appliedModel ||
+                  selectedSource !== appliedSource ||
+                  Boolean(summary.sources && summary.sources.length > 1 && appliedSource === "all") ||
                   Boolean(summary.quotaWindow && summary.quotaWindow.mode !== cycle)
                 }
               />
@@ -724,6 +768,7 @@ export function App() {
         {/* 点击会话“详情”弹出的单步 Token 拆解对话框 */}
         <ConversationDetailDialog
           conversationId={activeConvId}
+          sourceId={appliedSource}
           open={activeConvId !== null}
           onOpenChange={(open) => {
             if (!open) setActiveConvId(null);

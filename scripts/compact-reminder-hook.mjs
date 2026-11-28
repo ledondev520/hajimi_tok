@@ -2,7 +2,7 @@
 /**
  * Input: Antigravity PreInvocation Hook stdin JSON（含 transcriptPath、modelName），或命令行参数 --install / --uninstall。
  * Output: 上下文 Prompt（input_tokens + cache_read_tokens）在当前压缩周期首次达到 400K 时输出一次性纯软提醒 Hook JSON（内联醒目 user_markdown + 引导模型在结尾拟好 `/compact` 指令，绝不熔断）；支持安全无侵入安装/卸载至 ~/.gemini/config/hooks.json。
- * Pos: 可选 Antigravity 全局 400K 上下文压缩软提醒 Hook 脚本，默认零侵入不自动写入（scripts/compact-reminder-hook.mjs）。
+ * Pos: Antigravity 全局 400K 上下文压缩软提醒 Hook 脚本（service:install 自动无侵入注册，支持随时卸载）（scripts/compact-reminder-hook.mjs）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 

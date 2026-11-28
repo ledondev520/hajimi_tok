@@ -4,7 +4,7 @@
  * Pos: 主会话级 Token 汇总、子代理折叠展开与单步详情钻取核心表格组件（src/components/ConversationExplorer.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Bot, ChevronDown, ChevronRight, Eye, RotateCcw, Search, X } from "lucide-react";
 import type { ConversationUsageSummary } from "@/types/telemetry";
 import {
@@ -175,7 +175,9 @@ export function groupByMainConversation(
  * 参数：props — 会话列表、筛选控制项及单步详情回调。
  * 返回值：高信息密度会话消耗表格卡片。
  */
-export function ConversationExplorer({
+const INITIAL_VISIBLE_ROWS = 30; // 首屏默认渲染条数，降低移动端与长列表 DOM 压力
+
+export const ConversationExplorer = memo(function ConversationExplorer({
   conversations,
   selectedWorkspace,
   onWorkspaceChange,
@@ -198,6 +200,7 @@ export function ConversationExplorer({
   const [includeArchived, setIncludeArchived] = useState(initPrefs.includeArchived ?? true);
   const [onlyWarm, setOnlyWarm] = useState(initPrefs.onlyWarm ?? false);
   const [expandedRootIds, setExpandedRootIds] = useState<Set<string>>(() => new Set());
+  const [showAllRows, setShowAllRows] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -270,17 +273,13 @@ export function ConversationExplorer({
       if (sortBy === "cost") return (b.rolledCostUsd - a.rolledCostUsd) * dir;
       if (sortBy === "calls") return (b.rolledCallCount - a.rolledCallCount) * dir;
       if (sortBy === "cacheRate") return (b.rolledCacheHitRate - a.rolledCacheHitRate) * dir;
-      return (
-        (new Date(b.rolledLastModifiedAt).getTime() -
-          new Date(a.rolledLastModifiedAt).getTime()) *
-        dir
-      );
+      return (new Date(b.rolledLastModifiedAt).getTime() - new Date(a.rolledLastModifiedAt).getTime()) * dir;
     });
   }, [allGroups, includeArchived, onlyWarm, warmGroupIds, selectedWorkspace, searchQuery, sortBy, sortDir]);
+  const visibleGroups = showAllRows ? filteredGroups : filteredGroups.slice(0, INITIAL_VISIBLE_ROWS);
+  const hiddenRowCount = Math.max(0, filteredGroups.length - visibleGroups.length);
 
-  const hasActiveFilter = Boolean(
-    searchQuery.trim() || selectedWorkspace || selectedModel || !includeArchived || onlyWarm
-  );
+  const hasActiveFilter = Boolean(searchQuery.trim() || selectedWorkspace || selectedModel || !includeArchived || onlyWarm);
 
   /**
    * 职责：切换指定主会话下 Subagent 折叠行的展开/收起状态。
@@ -446,7 +445,7 @@ export function ConversationExplorer({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredGroups.map((group) => {
+              {visibleGroups.map((group) => {
                 const { root, children } = group;
                 const hasSub = children.length > 0;
                 const isExpanded = expandedRootIds.has(root.conversationId);
@@ -748,51 +747,44 @@ export function ConversationExplorer({
                               className="border-slate-200/40 bg-slate-50/70 text-[11px] dark:border-slate-800/50 dark:bg-slate-900/40"
                             >
                               <TableCell className="w-9 px-1.5 py-1 text-center">
-                                <Button
-                                  type="button"
-                                  size="xs"
-                                  variant="ghost"
-                                  aria-label={`查看 ${subLabel} 步骤详情`}
-                                  title="查看步骤详情"
-                                  onClick={() => onInspectConversation(sub)}
-                                  className="h-5 w-6 p-0"
-                                >
-                                  <Eye className="size-3" />
-                                </Button>
-                              </TableCell>
-                              <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
-                                <span className="inline-flex min-w-0 items-center gap-1">
-                                  <span className="shrink-0 text-slate-400">{branchChar}</span>
-                                  <Bot className="size-3 shrink-0 text-violet-500" />
-                                  <span className="truncate">{subLabel}</span>
-                                  <span className="shrink-0 font-mono text-[10px] text-slate-400">
-                                    ({sub.conversationId.slice(0, 6)})
+                                  <Button type="button" size="xs" variant="ghost" aria-label={`查看 ${subLabel} 步骤详情`} title="查看步骤详情" onClick={() => onInspectConversation(sub)} className="h-5 w-6 p-0">
+                                    <Eye className="size-3" />
+                                  </Button>
+                                </TableCell>
+                                <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
+                                  <span className="inline-flex min-w-0 items-center gap-1">
+                                    <span className="shrink-0 text-slate-400">{branchChar}</span>
+                                    <Bot className="size-3 shrink-0 text-violet-500" />
+                                    <span className="truncate">{subLabel}</span>
+                                    <span className="shrink-0 font-mono text-[10px] text-slate-400">({sub.conversationId.slice(0, 6)})</span>
                                   </span>
-                                </span>
-                              </TableCell>
-                              <TableCell className="py-1 text-slate-400">-</TableCell>
-                              <TableCell title={sub.primaryModel} className="py-1 text-slate-500 dark:text-slate-400">
-                                {compactModelName(sub.primaryModel)}
-                              </TableCell>
-                              <TableCell className="py-1 text-right text-slate-500 tabular-nums">{sub.callCount}</TableCell>
-                              <TableCell className="py-1 text-right text-slate-400 tabular-nums">
-                                {formatTokens(sub.inputTokens)} / {formatTokens(sub.cacheReadTokens)} / {formatTokens(sub.outputTokens)}
-                              </TableCell>
-                              <TableCell className="py-1 text-right font-medium text-slate-700 tabular-nums dark:text-slate-200">{formatTokens(sub.totalTokens)}</TableCell>
-                              <TableCell className="py-1 text-right text-slate-600 tabular-nums dark:text-slate-300">{formatUsd(sub.estimatedCostUsd)}</TableCell>
-                              <TableCell className="py-1 text-right text-slate-400 tabular-nums">{formatRelativeTime(sub.lastModifiedAt)}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </TableBody>
-          </Table>
+                                </TableCell>
+                                <TableCell className="py-1 text-slate-400">-</TableCell>
+                                <TableCell title={sub.primaryModel} className="py-1 text-slate-500 dark:text-slate-400">{compactModelName(sub.primaryModel)}</TableCell>
+                                <TableCell className="py-1 text-right text-slate-500 tabular-nums">{sub.callCount}</TableCell>
+                                <TableCell className="py-1 text-right text-slate-400 tabular-nums">{formatTokens(sub.inputTokens)} / {formatTokens(sub.cacheReadTokens)} / {formatTokens(sub.outputTokens)}</TableCell>
+                                <TableCell className="py-1 text-right font-medium text-slate-700 tabular-nums dark:text-slate-200">{formatTokens(sub.totalTokens)}</TableCell>
+                                <TableCell className="py-1 text-right text-slate-600 tabular-nums dark:text-slate-300">{formatUsd(sub.estimatedCostUsd)}</TableCell>
+                                <TableCell className="py-1 text-right text-slate-400 tabular-nums">{formatRelativeTime(sub.lastModifiedAt)}</TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+        )}
+        {hiddenRowCount > 0 && (
+          <div className="mt-2 flex justify-center">
+            <Button type="button" variant="outline" size="xs" onClick={() => setShowAllRows(true)} className="h-7 px-3 text-xs">
+              展开剩余 {hiddenRowCount} 条主会话（共 {filteredGroups.length} 条）
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>
   );
-}
+});

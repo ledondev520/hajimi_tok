@@ -9,6 +9,7 @@ import type { DashboardSummaryPayload } from "../src/types/telemetry";
 
 /** CLI 命令行解析结果结构 */
 export interface ParsedCliArgs {
+  source?: string; // 按数据源 / 账号 ID 过滤（如 all / native / t3:antigravity）
   days?: number; // 最近 N 天过滤窗口
   workspace?: string; // 按工作区名称或路径过滤
   model?: string; // 按模型名称过滤
@@ -66,6 +67,10 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     } else if (flag === "--limit" || flag === "-n") {
       const parsed = Number(nextVal);
       if (Number.isFinite(parsed) && parsed > 0) result.limit = Math.floor(parsed);
+      if (consumeNext) i += 1;
+    } else if (flag === "--source" || flag === "-s") {
+      const trimmed = nextVal.trim();
+      if (trimmed) result.source = trimmed;
       if (consumeNext) i += 1;
     } else if (flag === "--data-dir") {
       const trimmed = nextVal.trim();
@@ -191,7 +196,7 @@ export function renderCliHelp(): string {
   // 0. 输出支持的全部过滤参数与示例命令
   return [
     "AntiGravity Token Radar CLI",
-    "Usage: npm run stats -- [-d <days>] [-w <workspace>] [-m <model>] [-n <limit>] [--data-dir <path>] [--json] [-h]",
+    "Usage: npm run stats -- [-s <source>] [-d <days>] [-w <workspace>] [-m <model>] [-n <limit>] [--data-dir <path>] [--json] [-h]",
   ].join("\n");
 }
 
@@ -233,6 +238,25 @@ export function renderCliReport(summary: DashboardSummaryPayload, limit = 10): s
       ],
     )}`,
   );
+
+  // 2.5. 多账号/多数据源拆解表（自动发现 T3 Code 多账号与原生目录时展示）
+  if (summary.sources && summary.sources.length > 1) {
+    sections.push(
+      `[By Account / Source]\n${renderBoxTable(
+        ["Source", "ID", "Convs", "Calls", "Today", "Total Tokens", "Est. Cost"],
+        ["left", "left", "right", "right", "right", "right", "right"],
+        summary.sources.map((src) => [
+          truncateDisplay(src.label, 18),
+          truncateDisplay(src.id, 18),
+          fmtMetric(src.conversationCount, "int"),
+          fmtMetric(src.callCount, "int"),
+          fmtMetric(src.todayEstimatedCostUsd, "usd"),
+          fmtMetric(src.totalTokens, "int"),
+          fmtMetric(src.estimatedCostUsd, "usd"),
+        ]),
+      )}`,
+    );
+  }
 
   // 3. 按模型维度拆解表
   sections.push(

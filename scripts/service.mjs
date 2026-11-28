@@ -262,6 +262,22 @@ async function main(action) {
         /* 桥接安装失败不影响常驻服务启动 */
       }
     }
+    // 1.1.2. 若本机存在 ~/.gemini 目录且未显式跳过，自动无侵入注册 400K 上下文压缩软提醒 Hook
+    const compactHookScript = path.join(ROOT, "scripts", "compact-reminder-hook.mjs");
+    if (
+      process.env.AGY_SKIP_COMPACT_HOOK !== "1" &&
+      fs.existsSync(compactHookScript) &&
+      fs.existsSync(path.join(os.homedir(), ".gemini"))
+    ) {
+      try {
+        execFileSync(process.execPath, [compactHookScript, "--install"], {
+          stdio: "inherit",
+          timeout: 5000,
+        });
+      } catch {
+        /* 压缩提醒 Hook 安装失败不影响常驻服务启动 */
+      }
+    }
     return;
   }
 

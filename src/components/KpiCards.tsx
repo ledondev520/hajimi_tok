@@ -4,7 +4,7 @@
  * Pos: 看板首屏紧凑 KPI 概览层，单行并排展示四张高信息密度卡片（src/components/KpiCards.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { BrainCircuit, Coins, Info, Layers, Zap } from "lucide-react";
 import type {
   GlobalKpiTotals,
@@ -48,15 +48,16 @@ export interface KpiCardsProps {
   quotaWindow?: QuotaCycleInfo; // 当前配额池的 5h/7d 周期窗口摘要
   liveQuota?: LivePoolQuotaSnapshot; // 可选：由 agy 官方 statusLine 桥接同步的实时官方周剩余
   isWorkspaceFiltered?: boolean; // 是否处于单一工作区筛选视图（禁止写回整池周校准）
+  activeSource?: string; // 当前激活的数据源 ID（多账号场景下用于隔离周校准存储）
 }
 
 /**
  * 职责：紧凑渲染顶部四张核心指标卡片（总消耗、缓存命中率、输出拆解、等效成本与分模型拆解）。
  * 思路：采用 grid-cols-2 lg:grid-cols-4 保证宽屏一行四卡、分屏两列两行自适应，所有底栏支持 flex-wrap 防窄窗穿模溢出。
- * 参数：props — 包含 totals 核心统计、byModel 分模型拆解、mainConversationCount 主会话数及可选 activeModelLabel / quotaWindow。
+ * 参数：props — 包含 totals 核心统计、byModel 分模型拆解、mainConversationCount 主会话数及可选 activeModelLabel / quotaWindow / activeSource。
  * 返回值：响应式四卡紧凑 KPI 网格节点。
  */
-export function KpiCards({
+export const KpiCards = memo(function KpiCards({
   totals,
   byModel = [],
   mainConversationCount,
@@ -65,7 +66,11 @@ export function KpiCards({
   quotaWindow,
   liveQuota,
   isWorkspaceFiltered = false,
+  activeSource = "",
 }: KpiCardsProps) {
+  const srcQ = activeSource && activeSource !== "all" ? `source=${encodeURIComponent(activeSource)}` : "";
+  const calUrl = srcQ ? `/api/calibrations?${srcQ}` : "/api/calibrations";
+  const calStoreKey = srcQ ? `${WEEKLY_CALIBRATION_STORAGE_KEY}:${activeSource}` : WEEKLY_CALIBRATION_STORAGE_KEY;
   // 0. 周配额剩余百分比校准态（仅「当前 7d + 整池未筛工作区」允许写入，历史回看与单项目视图严格只读防污染）
   const isWeeklyPoolView = Boolean(
     activePoolKey &&
@@ -75,14 +80,10 @@ export function KpiCards({
   );
   const [calibrationsSynced, setCalibrationsSynced] = useState<boolean>(false);
   const [calibrationSyncError, setCalibrationSyncError] = useState<string>("");
-  const canWriteWeeklyCalibration = Boolean(
-    calibrationsSynced && isWeeklyPoolView && quotaWindow?.mode === "7d"
-  );
-  const calibrationKey = isWeeklyPoolView
-    ? `${activePoolKey}:${quotaWindow!.windowStart}`
-    : "";
+  const canWriteWeeklyCalibration = Boolean(calibrationsSynced && isWeeklyPoolView && quotaWindow?.mode === "7d");
+  const calibrationKey = isWeeklyPoolView ? `${activePoolKey}:${quotaWindow!.windowStart}` : "";
   const [calibrations, setCalibrations] = useState<Record<string, WeeklyQuotaCalibration>>(() =>
-    readStoredJson<Record<string, WeeklyQuotaCalibration>>(WEEKLY_CALIBRATION_STORAGE_KEY, {})
+    readStoredJson<Record<string, WeeklyQuotaCalibration>>(calStoreKey, {})
   );
   const matchedCalibration = useMemo(
     () =>
@@ -124,7 +125,7 @@ export function KpiCards({
       const next = { ...prev };
       if (authoritative) next[reqKey] = authoritative;
       else delete next[reqKey];
-      writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
+      writeStoredJson(calStoreKey, next);
       return next;
     });
   };
@@ -134,7 +135,7 @@ export function KpiCards({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/calibrations");
+        const res = await fetch(calUrl);
         if (!res.ok) {
           if (!cancelled) {
             const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -156,7 +157,7 @@ export function KpiCards({
               if (k in prev) next[k] = prev[k];
               else delete next[k];
             }
-            writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
+            writeStoredJson(calStoreKey, next);
             return next;
           });
           setCalibrationSyncError("");
@@ -164,20 +165,17 @@ export function KpiCards({
           return;
         }
 
-        const local = readStoredJson<Record<string, WeeklyQuotaCalibration>>(
-          WEEKLY_CALIBRATION_STORAGE_KEY,
-          {}
-        );
+        const local = readStoredJson<Record<string, WeeklyQuotaCalibration>>(calStoreKey, {});
         if (Object.keys(local).length === 0) {
           setCalibrations(remote);
-          writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, remote);
+          writeStoredJson(calStoreKey, remote);
           setCalibrationSyncError("");
           setCalibrationsSynced(true);
           return;
         }
 
         // 服务端未初始化且本地有历史：整批原子提交；若遇 409 表示另一窗口已完成初始化，直接采纳服务端权威状态
-        const postRes = await fetch("/api/calibrations", {
+        const postRes = await fetch(calUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ batch: local }),
@@ -189,7 +187,7 @@ export function KpiCards({
           } | null;
           if (!cancelled && conflictPayload?.calibrations) {
             setCalibrations(conflictPayload.calibrations);
-            writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, conflictPayload.calibrations);
+            writeStoredJson(calStoreKey, conflictPayload.calibrations);
             setCalibrationSyncError("");
             setCalibrationsSynced(true);
           }
@@ -207,7 +205,7 @@ export function KpiCards({
         };
         if (cancelled || !savedPayload?.calibrations) return;
         setCalibrations(savedPayload.calibrations);
-        writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, savedPayload.calibrations);
+        writeStoredJson(calStoreKey, savedPayload.calibrations);
         setCalibrationSyncError("");
         setCalibrationsSynced(true);
       } catch {
@@ -222,7 +220,7 @@ export function KpiCards({
         window.clearTimeout(syncTimerRef.current);
       }
     };
-  }, []);
+  }, [calUrl, calStoreKey]);
 
   // 0.0.1. 仅在服务端完成初始化同步 + 当前 7d + 整池未筛工作区视图下，才将官方 statusLine 实时周剩余按采样时刻整池消耗回填
   useEffect(() => {
@@ -262,7 +260,7 @@ export function KpiCards({
       calibratedTokens: sampleTokens,
       calibratedAt: liveQuota.updatedAt,
     };
-    void fetch("/api/calibrations", {
+    void fetch(calUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: reqKey, source: "auto", ...entry }),
@@ -270,7 +268,7 @@ export function KpiCards({
       .then((res) => (res.ok ? res.json() : null))
       .then((payload) => syncAuthoritativeKey(reqKey, reqSeq, payload))
       .catch(() => undefined);
-  }, [calibrationsSynced, canWriteWeeklyCalibration, calibrationKey, liveQuota, quotaWindow?.windowStart, quotaWindow?.windowEnd, totals.estimatedCostUsd, totals.totalTokens, activeCalibration]);
+  }, [calibrationsSynced, canWriteWeeklyCalibration, calibrationKey, liveQuota, quotaWindow?.windowStart, quotaWindow?.windowEnd, totals.estimatedCostUsd, totals.totalTokens, activeCalibration, calUrl]);
 
   useEffect(() => {
     const keyChanged = prevCalibrationKeyRef.current !== calibrationKey;
@@ -330,14 +328,14 @@ export function KpiCards({
           }
         }
         if (!changed) return prev;
-        writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
+        writeStoredJson(calStoreKey, next);
         return next;
       });
       syncTimerRef.current = window.setTimeout(() => {
         isUserEditingRef.current = false;
         for (const k of keysToRemove) {
           const reqSeq = delSeqMap.get(k);
-          void fetch(`/api/calibrations?key=${encodeURIComponent(k)}&at=${encodeURIComponent(deletedAtIso)}`, { method: "DELETE" })
+          void fetch(`/api/calibrations?${srcQ ? `${srcQ}&` : ""}key=${encodeURIComponent(k)}&at=${encodeURIComponent(deletedAtIso)}`, { method: "DELETE" })
             .then((res) => (res.ok ? res.json() : null))
             .then((payload) => syncAuthoritativeKey(k, reqSeq, payload))
             .catch(() => undefined);
@@ -358,12 +356,12 @@ export function KpiCards({
     };
     setCalibrations((prev) => {
       const next = { ...prev, [reqKey]: entry };
-      writeStoredJson(WEEKLY_CALIBRATION_STORAGE_KEY, next);
+      writeStoredJson(calStoreKey, next);
       return next;
     });
     syncTimerRef.current = window.setTimeout(() => {
       isUserEditingRef.current = false;
-      void fetch("/api/calibrations", {
+      void fetch(calUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: reqKey, source: "manual", ...entry }),
@@ -638,7 +636,7 @@ export function KpiCards({
               </Tooltip>
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-400 tabular-nums">
-              <span>
+              <span className="hidden sm:inline">
                 {mainConversationCount}会话 · {formatExactNumber(totals.callCount)}轮
               </span>
               <Coins className="size-3.5 text-amber-500" />
@@ -791,4 +789,4 @@ export function KpiCards({
       </Card>
     </section>
   );
-}
+});
