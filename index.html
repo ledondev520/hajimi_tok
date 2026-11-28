@@ -7,15 +7,30 @@
     <title>哈吉米统计</title>
     <script>
       try {
-        if (localStorage.getItem("agy_theme_mode") === "dark") {
-          document.documentElement.classList.add("dark");
-        } else {
-          document.documentElement.classList.remove("dark");
-        }
+        var mode = localStorage.getItem("agy_theme_mode") || "system";
+        var rawPreset = localStorage.getItem("agy_theme_preset") || "classic";
+        var legacyMap = {
+          indigo: "linear",
+          ocean: "tokyo",
+          emerald: "terminal",
+          violet: "stripe",
+          amber: "claude",
+          rose: "claude"
+        };
+        var validPresets = { classic: 1, mono: 1, linear: 1, claude: 1, stripe: 1, terminal: 1, tokyo: 1 };
+        var preset = validPresets[rawPreset] ? rawPreset : (legacyMap[rawPreset] || "classic");
+        var isDark =
+          mode === "dark" ||
+          (mode !== "light" &&
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", Boolean(isDark));
+        document.documentElement.dataset.theme = preset;
+        document.documentElement.style.colorScheme = isDark ? "dark" : "light";
       } catch (_) {}
     </script>
   </head>
-  <body class="min-h-screen bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500/20 dark:bg-slate-950 dark:text-slate-50">
+  <body class="min-h-screen antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

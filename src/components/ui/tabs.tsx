@@ -30,8 +30,8 @@ const tabsListVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-slate-100 dark:bg-slate-800",
-        line: "gap-1 bg-transparent",
+        default: "",
+        line: "gap-1 border-transparent bg-transparent",
       },
     },
     defaultVariants: { variant: "default" },
@@ -58,7 +58,7 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 py-1 text-xs font-medium whitespace-nowrap text-slate-600 transition-all hover:text-slate-950 focus-visible:ring-[3px] focus-visible:ring-indigo-500/30 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-white data-[state=active]:text-slate-950 data-[state=active]:shadow-xs [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 dark:text-slate-400 dark:hover:text-slate-100 dark:data-[state=active]:border-slate-700 dark:data-[state=active]:bg-slate-950 dark:data-[state=active]:text-slate-50",
+        "relative inline-flex h-[calc(100%-1px)] flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 py-1 text-xs font-medium whitespace-nowrap text-slate-600 transition-all hover:text-slate-950 focus-visible:ring-[3px] focus-visible:ring-[var(--theme-accent-soft)] disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 dark:text-slate-400 dark:hover:text-slate-100",
         className
       )}
       {...props}

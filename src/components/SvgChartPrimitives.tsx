@@ -8,8 +8,7 @@ import { type MouseEvent, type ReactNode, useEffect, useRef, useState } from "re
 import { readStoredJson, writeStoredJson } from "@/lib/format";
 
 /** 看板中部折线图卡片统一样式 */
-export const CHART_CARD_CLASS =
-  "min-w-0 gap-2 border-slate-200/80 bg-white py-2.5 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70";
+export const CHART_CARD_CLASS = "min-w-0 gap-2 py-2.5";
 
 /**
  * 职责：监听图表外层容器像素宽度并在窗口缩放时平滑重算 SVG 坐标系。

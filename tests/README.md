@@ -7,3 +7,4 @@
 - `compactReminder.test.ts`｜可选 400K 上下文压缩软提醒 Hook 触发、去重、防 `metadata` panic 回归、`Stop` 单次兜底补卡与防死循环、UTF-8 分块边界与无侵入安装/卸载单测
 - `update.test.ts`｜轻量手动更新（`update.mjs`）与常驻服务管理（`service.mjs` PATH/HOME 注入、旧 plist 迁移、回滚与防误删）隔离沙箱测试
 - `workspaceNormalize.test.ts`｜git/T3/Swarm 工作树项目归并、未绑定与临时目录合为「临时对话」、空壳会话过滤、跨源去重与落盘缓存单测
+- `theme.test.ts`｜外观明暗模式规范化、跟随系统解析、6 套全维度视觉主题预设与旧预设迁移、虚拟 CSS 变量覆盖及平滑贝塞尔曲线路径单测

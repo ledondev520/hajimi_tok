@@ -5,7 +5,7 @@
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, CalendarDays, Moon, Sun } from "lucide-react";
+import { Activity, AlertCircle, CalendarDays } from "lucide-react";
 import type {
   ConversationUsageSummary,
   DashboardSummaryPayload,
@@ -19,15 +19,18 @@ import {
   writeStoredJson,
 } from "@/lib/format";
 import { resolveModelPool, stripModelReasoningSuffix } from "@/lib/models";
+import { useThemeState } from "@/lib/theme";
 import { CacheHitRateCard } from "@/components/CacheHitRateCard";
 import { DailyUsageCard } from "@/components/DailyUsageCard";
 import { KpiCards } from "@/components/KpiCards";
+import { ModelBreakdownCard } from "@/components/ModelBreakdownCard";
 import { ModelCallChart, type NodeWindowKey } from "@/components/ModelCallChart";
 import {
   ConversationExplorer,
   groupByMainConversation,
 } from "@/components/ConversationExplorer";
 import { SourceSwitcherBar } from "@/components/SourceSwitcherBar";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 
 const ConversationDetailDialog = lazy(() =>
   import("@/components/ConversationDetailDialog").then((m) => ({ default: m.ConversationDetailDialog }))
@@ -52,7 +55,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-const THEME_STORAGE_KEY = "agy_theme_mode"; // 本地持久化白天/深色主题偏好的键名
 const CYCLE_STORAGE_KEY = "agy_quota_cycle_v2"; // 本地持久化配额周期选择偏好的键名（默认 7d 周周期）
 const VALID_CYCLE_SET = new Set<QuotaCycleMode>(["7d", "prev-7d", "all"]); // 固定枚举周期集合
 const WINDOW_CYCLE_RE = /^window:\d+:\d+$/; // 任意历史 7 天周期窗口标识正则
@@ -65,9 +67,6 @@ export interface ModelShortcutItem {
   tooltip: string; // 悬停说明当前池涵盖的具体模型列表
   hotkey: string; // 数字快捷键（1~9）
 }
-
-/** 主题模式枚举（默认 light 白天模式） */
-type ThemeMode = "light" | "dark";
 
 /**
  * 职责：按 AntiGravity 配额池规则生成顶栏快捷切换项，将 Opus 5.5 与后续 Sonnet 5.5 等归入同一「Claude 池」，Gemini 全系归入独立「Gemini 池」。
@@ -129,19 +128,6 @@ export function buildModelShortcuts(availableModels: string[]): ModelShortcutIte
 }
 
 /**
- * 职责：读取初始主题偏好，默认使用清爽的白天（light）模式。
- * 返回值："light" 或 "dark"。
- */
-function resolveInitialTheme(): ThemeMode {
-  // 0. 优先读取 localStorage，未设置时默认返回白天模式
-  try {
-    return window.localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
-  } catch {
-    return "light";
-  }
-}
-
-/**
  * 职责：读取初始配额周期模式，默认选中「当前 7d 周周期」。
  * 返回值：QuotaCycleMode 枚举值。
  */
@@ -159,7 +145,7 @@ function resolveInitialCycle(): QuotaCycleMode {
 
 /**
  * 职责：渲染高密度紧凑版 AntiGravity 会话 Token 统计主视图。
- * 思路：1) 顶部紧凑单行四卡；2) 下方仅按主会话行展示（Subagent 自动合并折叠在对应主会话下）；3) 支持白天/深色一键切换。
+ * 思路：1) 顶部紧凑单行四卡；2) 下方仅按主会话行展示（Subagent 自动合并折叠在对应主会话下）；3) 支持多主题配色与浅色/深色/跟随系统实时切换。
  * 参数：无。
  * 返回值：React 根视图节点。
  */
@@ -191,7 +177,7 @@ export function App() {
   const [appliedWorkspace, setAppliedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
   const [selectedModel, setSelectedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
   const [appliedModel, setAppliedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
-  const [theme, setTheme] = useState<ThemeMode>(resolveInitialTheme);
+  const theme = useThemeState();
   // 首屏秒开快照（SWR）：先瞬显本地缓存的上次视图，再在后台无感拉取最新数据覆盖
   const bootSnapshot = useMemo(() => {
     const snap = readStoredJson<{ key?: string; data?: DashboardSummaryPayload }>(
@@ -220,15 +206,7 @@ export function App() {
   const buildIdRef = useRef<string>(""); // 记录当前前端构建指纹，后台静默更新重启后自动无感重载页面
   const nodeLimitParam = chartWindow === "all" ? "" : "300"; // 非「全部」节点模式按需拉取尾部与今日节点，减负 90%+ 载荷
 
-  // 0.1. 同步主题与周期偏好至 documentElement / localStorage
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      /* 忽略受限存储异常 */
-    }
-  }, [theme]);
+  // 0.1. 同步周期偏好至 localStorage
 
   useEffect(() => {
     try {
@@ -466,21 +444,28 @@ export function App() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen overflow-x-hidden bg-slate-50 text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-50">
-        {/* 极简单行顶栏（实心背景免移动端粘性滚动重绘卡顿） */}
-        <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white shadow-2xs dark:border-slate-800/80 dark:bg-slate-950">
-          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-5">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <div className="flex shrink-0 items-center gap-2">
-                <div className="flex size-6 items-center justify-center rounded-md bg-indigo-600 text-white">
-                  <Activity className="size-3.5" />
+      <div className="theme-canvas min-h-screen overflow-x-hidden">
+        {/* 现代极简粘性顶栏（对标 Vercel / Linear） */}
+        <header className="theme-header sticky top-0 z-30 border-b">
+          <div className="mx-auto flex max-w-[1320px] flex-wrap items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex shrink-0 items-center gap-2.5">
+                <div className="theme-brand-badge flex size-7 items-center justify-center rounded-lg">
+                  <Activity className="size-3.5 stroke-[2.2]" />
                 </div>
-                <h1 className="text-sm font-semibold tracking-tight whitespace-nowrap text-slate-900 dark:text-slate-50">
-                  哈吉米统计
-                </h1>
+                <div className="flex items-baseline gap-1.5">
+                  <h1 className="text-[14px] font-semibold tracking-tight whitespace-nowrap text-[var(--theme-text)]">
+                    哈吉米统计
+                  </h1>
+                  <span className="hidden font-mono text-[10px] tracking-wider text-[var(--theme-text-muted)] uppercase sm:inline">
+                    Telemetry
+                  </span>
+                </div>
               </div>
 
-              {/* 配额池一键切换栏（Claude 池聚合 Opus/Sonnet，Gemini 池独立核算） */}
+              <span className="hidden h-4 w-px bg-[var(--theme-border)] sm:inline-block" />
+
+              {/* 配额池一键切换栏 */}
               <Tabs
                 value={activeModelShortcut.tabValue}
                 onValueChange={(val) => {
@@ -489,18 +474,18 @@ export function App() {
                 }}
                 aria-label="模型配额池快捷切换"
               >
-                <TabsList className="h-7 p-0.5">
+                <TabsList className="h-8 rounded-lg p-0.5">
                   {modelShortcuts.map((item) => (
                     <Tooltip key={item.tabValue}>
                       <TooltipTrigger asChild>
                         <span className="inline-flex h-full">
                           <TabsTrigger
                             value={item.tabValue}
-                            className="gap-1 px-2 text-xs data-[state=active]:text-indigo-600 dark:data-[state=active]:text-indigo-300"
+                            className="gap-1.5 rounded-md px-2.5 text-xs font-medium"
                           >
                             <span>{item.label}</span>
                             {item.hotkey && (
-                              <kbd className="hidden rounded bg-slate-200/70 px-1 font-mono text-[10px] leading-4 text-slate-500 sm:inline dark:bg-slate-700/70 dark:text-slate-400">
+                              <kbd className="hidden rounded border border-[var(--theme-border)] bg-[var(--theme-surface-elevated)] px-1 font-mono text-[9.5px] leading-3.5 text-[var(--theme-text-muted)] sm:inline">
                                 {item.hotkey}
                               </kbd>
                             )}
@@ -514,7 +499,7 @@ export function App() {
               </Tabs>
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
               {(() => {
                 const availableCycles = summary?.quotaWindow?.available7dCycles ?? [];
                 const cycleInOptions =
@@ -535,7 +520,7 @@ export function App() {
                   <Select value={cycle} onValueChange={(v) => setCycle(v as QuotaCycleMode)}>
                     <SelectTrigger
                       size="sm"
-                      className="h-7 w-auto min-w-[165px] max-w-[248px] px-2.5 text-xs tabular-nums"
+                      className="h-8 w-auto min-w-[172px] max-w-[258px] rounded-lg px-2.5 text-xs font-medium tabular-nums"
                       aria-label="配额周期切换"
                     >
                       <SelectValue placeholder="当前 7d 周周期" />
@@ -591,10 +576,17 @@ export function App() {
                         variant="secondary"
                         className={
                           summary.quotaWindow.isIdleReset
-                            ? "h-6 cursor-default border border-emerald-500/25 bg-emerald-500/10 px-2 text-[11px] text-emerald-700 tabular-nums dark:text-emerald-300"
-                            : "h-6 cursor-default border border-indigo-500/20 bg-indigo-500/10 px-2 text-[11px] text-indigo-700 tabular-nums dark:text-indigo-300"
+                            ? "h-7 cursor-default gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-2.5 text-[11px] font-medium text-emerald-700 tabular-nums dark:text-emerald-300"
+                            : "theme-accent-pill h-7 cursor-default gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium tabular-nums"
                         }
                       >
+                        <span
+                          className={`size-1.5 rounded-full ${
+                            summary.quotaWindow.isIdleReset
+                              ? "bg-emerald-500"
+                              : "bg-[var(--theme-accent)]"
+                          }`}
+                        />
                         {summary.quotaWindow.isIdleReset
                           ? "已重置·待触发"
                           : `${formatCycleCountdown(summary.quotaWindow.resetsInMs)}后重置`}
@@ -610,13 +602,15 @@ export function App() {
                   </Tooltip>
                 )}
 
+              <span className="hidden h-4 w-px bg-[var(--theme-border)] sm:inline-block" />
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="outline"
                     size="xs"
                     asChild
-                    className="h-7 w-7 p-0 text-slate-700 dark:text-slate-200"
+                    className="h-8 w-8 rounded-lg p-0"
                   >
                     <a
                       href={
@@ -628,45 +622,27 @@ export function App() {
                       rel="noopener noreferrer"
                       aria-label="打开重置日历与登记页"
                     >
-                      <CalendarDays className="size-3.5 text-indigo-500" />
+                      <CalendarDays className="size-3.5 text-[var(--theme-text-secondary)]" />
                     </a>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>重置日历 / 登记</TooltipContent>
               </Tooltip>
 
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="xs"
-                    aria-label={theme === "dark" ? "切换至白天模式" : "切换至深色模式"}
-                    onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
-                    className="h-7 w-7 p-0 text-slate-700 dark:text-slate-200"
-                  >
-                    {theme === "dark" ? (
-                      <Sun className="size-3.5 text-amber-400" />
-                    ) : (
-                      <Moon className="size-3.5 text-indigo-500" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{theme === "dark" ? "切换白天" : "切换深色"}</TooltipContent>
-              </Tooltip>
+              <ThemeSwitcher theme={theme} />
             </div>
           </div>
         </header>
 
-        {/* 紧凑高密度内容区 */}
-        <main className="mx-auto max-w-7xl space-y-3 px-4 py-3.5 sm:px-5">
+        {/* 分层 Bento 仪表盘内容区 */}
+        <main className="mx-auto max-w-[1320px] space-y-4 px-4 py-4 sm:px-6 sm:py-5">
           {error && (
             <div
               role="alert"
-              className="flex items-center justify-between gap-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+              className="flex items-center justify-between gap-3 rounded-xl border border-red-500/25 bg-red-500/8 px-4 py-2.5 text-xs text-red-700 dark:text-red-300"
             >
-              <div className="flex items-center gap-1.5">
-                <AlertCircle className="size-3.5 shrink-0" />
+              <div className="flex items-center gap-2">
+                <AlertCircle className="size-4 shrink-0" />
                 <span>读取统计服务失败：{error}</span>
               </div>
               <Button size="xs" variant="outline" onClick={() => void fetchSummary(true)}>
@@ -676,8 +652,16 @@ export function App() {
           )}
 
           {loading && !summary ? (
-            <div className="py-14 text-center text-xs text-slate-500 dark:text-slate-400">
-              正在加载会话统计数据...
+            <div className="space-y-4">
+              <div className="theme-card h-[118px] animate-pulse rounded-2xl border" />
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="theme-card h-[268px] animate-pulse rounded-2xl border" />
+                <div className="theme-card h-[268px] animate-pulse rounded-2xl border" />
+              </div>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                <div className="theme-card h-[268px] animate-pulse rounded-2xl border lg:col-span-8" />
+                <div className="theme-card h-[268px] animate-pulse rounded-2xl border lg:col-span-4" />
+              </div>
             </div>
           ) : summary ? (
             <>
@@ -693,6 +677,8 @@ export function App() {
                 activeSource={appliedSource}
                 totals={summary.totals}
                 byModel={summary.byModel}
+                dailyTrend={summary.dailyTrend}
+                callTimeline={summary.callTimeline}
                 mainConversationCount={mainConvCount}
                 activeModelLabel={
                   appliedModelShortcut.modelQuery ? appliedModelShortcut.label : undefined
@@ -712,7 +698,7 @@ export function App() {
                   Boolean(summary.quotaWindow && summary.quotaWindow.mode !== cycle)
                 }
               />
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <DailyUsageCard
                   dailyTrend={summary.dailyTrend}
                   callTimeline={summary.callTimeline}
@@ -736,17 +722,28 @@ export function App() {
                   onSelectConversationId={setActiveConvId}
                 />
               </div>
-              <ModelCallChart
-                variant="tps"
-                nodes={summary.callTimeline}
-                byModel={summary.byModel}
-                totalCallCount={summary.totals.callCount}
-                windowKey={chartWindow}
-                onWindowKeyChange={setChartWindow}
-                hoveredSeq={hoveredNodeSeq}
-                onHoverSeq={setHoveredNodeSeq}
-                onSelectConversationId={setActiveConvId}
-              />
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                <div className="min-w-0 lg:col-span-8">
+                  <ModelCallChart
+                    variant="tps"
+                    nodes={summary.callTimeline}
+                    byModel={summary.byModel}
+                    totalCallCount={summary.totals.callCount}
+                    windowKey={chartWindow}
+                    onWindowKeyChange={setChartWindow}
+                    hoveredSeq={hoveredNodeSeq}
+                    onHoverSeq={setHoveredNodeSeq}
+                    onSelectConversationId={setActiveConvId}
+                  />
+                </div>
+                <div className="min-w-0 lg:col-span-4">
+                  <ModelBreakdownCard
+                    byModel={summary.byModel}
+                    totalCostUsd={summary.totals.estimatedCostUsd}
+                    totalTokens={summary.totals.totalTokens}
+                  />
+                </div>
+              </div>
               <ConversationExplorer
                 conversations={summary.conversations}
                 availableWorkspaces={summary.availableWorkspaces}
