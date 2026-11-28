@@ -1,10 +1,10 @@
 /**
- * Input: UsageTimeBucket 每日趋势序列、CallNodePoint 调用节点序列、ModelCallChart 单次节点折线组件与 @/components/ui 组件。
- * Output: 导出 DailyUsageCard 趋势主图组件（支持「近7天」主次双轴量价折线与「今日」单次调用增量折线一键切换）。
- * Pos: 看板中部核心双图之一（图 1），将近 7 天双轴分模型 Token/费用折线与今日单次节点调用增量折线合二为一（src/components/DailyUsageCard.tsx）。
+ * Input: UsageTimeBucket 每日趋势序列、CallNodePoint 调用节点序列、@/lib/format 工具、SvgChartPrimitives 共享绘图原语、ModelCallChart 与 @/components/ui 组件。
+ * Output: 导出 DailyUsageCard 趋势主图组件（支持「按日」主次双轴量价折线与「今日」单次调用增量折线一键切换）。
+ * Pos: 看板中部核心双图之一（图 1），将按日双轴分模型 Token/费用折线与今日单次节点调用增量折线合二为一（src/components/DailyUsageCard.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { CalendarDays } from "lucide-react";
 import type {
   CallNodePoint,
@@ -22,77 +22,76 @@ import {
   toLocalDayKey,
   writeStoredJson,
 } from "@/lib/format";
-
-export { extractTodayCallSummary, resolveDayMeta, toLocalDayKey };
 import {
   ModelCallChart,
   resolveModelStyle,
   type NodeWindowKey,
 } from "@/components/ModelCallChart";
+import {
+  buildAreaPath,
+  buildLinePath,
+  CHART_CARD_CLASS,
+  ChartEmptyBox,
+  ChartFloatingTooltip,
+  ChartLegendToggle,
+  SvgAreaGradients,
+  SvgGridAxes,
+  useContainerWidth,
+  usePersistedSet,
+} from "@/components/SvgChartPrimitives";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-/** 图表时间粒度模式：近 7 天按日双轴折线 vs 今日单次调用节点折线 */
+export { extractTodayCallSummary, resolveDayMeta, toLocalDayKey };
+
 type TrendGranularityMode = "7d" | "today";
 
-/** 单日内按模型家族归并后的数值项 */
 interface DayFamilyPoint {
-  familyKey: string; // 模型家族唯一键
-  label: string; // 模型短名称（如 Gemini 4 Argon / Gemini 4 Carbon / Opus 5.5）
-  color: string; // 专属颜色 HEX
-  callCount: number; // 当日调用轮数
-  totalTokens: number; // 当日总 Token
-  estimatedCostUsd: number; // 当日等效美元成本
+  familyKey: string;
+  label: string;
+  color: string;
+  callCount: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
 }
 
-/** 标准化后的单日时间序列点 */
 interface DailySeriesDay {
-  bucketKey: string; // YYYY-MM-DD
-  label: string; // MM-DD
-  weekdayLabel: string; // 周几或“今日”
-  isToday: boolean; // 是否为本地今日
-  callCount: number; // 当日总调用次数
-  totalTokens: number; // 当日总 Token
-  estimatedCostUsd: number; // 当日总等效成本（USD）
-  byFamily: Map<string, DayFamilyPoint>; // 模型家族键 -> 当日聚合值
+  bucketKey: string;
+  label: string;
+  weekdayLabel: string;
+  isToday: boolean;
+  callCount: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  byFamily: Map<string, DayFamilyPoint>;
 }
 
-/** 周期内模型家族元数据 */
 interface ModelFamilyMeta {
-  familyKey: string; // 模型家族唯一键
-  label: string; // 模型展示名
-  color: string; // 颜色 HEX
-  periodTokens: number; // 周期累计 Token
-  periodCostUsd: number; // 周期累计美元成本
+  familyKey: string;
+  label: string;
+  color: string;
+  periodTokens: number;
+  periodCostUsd: number;
 }
 
-/** DailyUsageCard 组件入参 */
 export interface DailyUsageCardProps {
-  dailyTrend: UsageTimeBucket[]; // 按日期升序排列的日趋势桶数组
-  callTimeline: CallNodePoint[]; // 按时间升序排列的单次调用节点数组
-  byModel: ModelUsageBreakdown[]; // 当前周期按模型汇总列表
-  windowKey: NodeWindowKey; // 单次节点窗口档位（与右侧 TPS 折线联动）
-  onWindowKeyChange: (key: NodeWindowKey) => void; // 窗口切换回调
-  hoveredSeq: number | null; // 跨图同步悬停节点序号
-  onHoverSeq: (seq: number | null) => void; // 悬停节点变更回调
-  onSelectConversationId: (conversationId: string) => void; // 点击单次节点打开会话详情
+  dailyTrend: UsageTimeBucket[];
+  callTimeline: CallNodePoint[];
+  byModel: ModelUsageBreakdown[];
+  windowKey: NodeWindowKey;
+  onWindowKeyChange: (key: NodeWindowKey) => void;
+  hoveredSeq: number | null;
+  onHoverSeq: (seq: number | null) => void;
+  onSelectConversationId: (conversationId: string) => void;
 }
 
-const CHART_HEIGHT = 152; // 与右侧单次节点 TPS 折线图保持完全等高（像素）
-const PAD_LEFT = 48; // 左侧主轴（Token）刻度留白
-const PAD_RIGHT = 50; // 右侧次轴（$ USD 费用）刻度留白
-const PAD_TOP = 12; // 顶部圆点留白
-const PAD_BOTTOM = 22; // 底部日期横轴留白
+const CHART_HEIGHT = 152;
+const PAD_LEFT = 48;
+const PAD_RIGHT = 50;
+const PAD_TOP = 12;
+const PAD_BOTTOM = 22;
 
-/**
- * 职责：渲染合并后的趋势主图卡片——默认展示「近7天」分模型 Token（左主轴实线 ●）与费用（右次轴虚线 ○）双轴同显折线，切换「今日」时呈现当日单次节点调用增量折线。
- * 思路：1) 顶栏右侧固定提供「近7天 | 今日」一键切换，去除冗余的单轴模式开关与累计增长开关；
- *      2) 「近7天」模式直接双轴同显各模型每日 Token 与美元费用；
- *      3) 「今日」模式筛选自然今日的调用节点复用 ModelCallChart 单次节点视图，并与右侧 TPS 折线保持跨图准星同步。
- * 参数：props — 包含 dailyTrend、callTimeline、byModel 及跨图联动状态。
- * 返回值：与右侧 TPS 折线图等高对齐的趋势折线卡片。
- */
 export const DailyUsageCard = memo(function DailyUsageCard({
   dailyTrend,
   callTimeline,
@@ -103,58 +102,27 @@ export const DailyUsageCard = memo(function DailyUsageCard({
   onHoverSeq,
   onSelectConversationId,
 }: DailyUsageCardProps) {
-  // 0. 粒度切换状态（持久化至 localStorage，默认「近7天」双轴同显）、图例显隐集合与宽度测量
   const [granularity, setGranularity] = useState<TrendGranularityMode>(() =>
     readStoredJson<string>("agy_chart_daily_granularity_v1", "7d") === "today" ? "today" : "7d"
   );
   useEffect(() => {
     writeStoredJson("agy_chart_daily_granularity_v1", granularity);
   }, [granularity]);
-  const [hiddenFamilies, setHiddenFamilies] = useState<Set<string>>(
-    () => new Set(readStoredJson<string[]>("agy_chart_hidden_daily_usage_v1", []))
-  );
-  const [showTokens, setShowTokens] = useState<boolean>(
-    () => readStoredJson<{ showTokens: boolean; showCost: boolean }>("agy_chart_daily_metrics_v1", { showTokens: true, showCost: true }).showTokens
-  );
-  const [showCost, setShowCost] = useState<boolean>(
-    () => readStoredJson<{ showTokens: boolean; showCost: boolean }>("agy_chart_daily_metrics_v1", { showTokens: true, showCost: true }).showCost
-  );
-  const [hoveredDayIdx, setHoveredDayIdx] = useState<number | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [svgWidth, setSvgWidth] = useState<number>(640);
 
-  useEffect(() => {
-    writeStoredJson("agy_chart_hidden_daily_usage_v1", [...hiddenFamilies]);
-  }, [hiddenFamilies]);
-
+  const [hiddenFamilies, toggleFamily] = usePersistedSet("agy_chart_hidden_daily_usage_v1");
+  const savedMetrics = readStoredJson<{ showTokens: boolean; showCost: boolean }>(
+    "agy_chart_daily_metrics_v1",
+    { showTokens: true, showCost: true }
+  );
+  const [showTokens, setShowTokens] = useState<boolean>(savedMetrics.showTokens);
+  const [showCost, setShowCost] = useState<boolean>(savedMetrics.showCost);
   useEffect(() => {
     writeStoredJson("agy_chart_daily_metrics_v1", { showTokens, showCost });
   }, [showTokens, showCost]);
 
-  const toggleFamily = (familyKey: string) => {
-    setHiddenFamilies((prev) => {
-      const next = new Set(prev);
-      if (next.has(familyKey)) next.delete(familyKey);
-      else next.add(familyKey);
-      return next;
-    });
-  };
+  const [hoveredDayIdx, setHoveredDayIdx] = useState<number | null>(null);
+  const { wrapRef, svgWidth } = useContainerWidth(granularity === "7d", 640);
 
-  useEffect(() => {
-    if (granularity !== "7d") return;
-    const el = wrapRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const updateWidth = () => {
-      const w = Math.round(el.getBoundingClientRect().width);
-      if (w > 120) setSvgWidth(w);
-    };
-    updateWidth();
-    const ro = new ResizeObserver(updateWidth);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [granularity]);
-
-  // 1.1. 仅在「今日」模式下筛选自然今日的单次调用节点，并结合 dailyTrend 今日桶保持全天轮数与模型均值准确
   const { todayNodes, todayByModel, todayTotalCalls } = useMemo(
     () =>
       granularity === "today"
@@ -163,15 +131,11 @@ export const DailyUsageCard = memo(function DailyUsageCard({
     [granularity, callTimeline, byModel, dailyTrend]
   );
 
-  // 1.2. 整理「近7天」按日分模型序列数据
   const { days, families, avgTokens, avgCost } = useMemo(() => {
     const todayKey = toLocalDayKey(new Date());
     const familyMap = new Map<string, ModelFamilyMeta>();
-
     let sumTokens = 0;
     let sumCost = 0;
-    let peakTokens = 0;
-    let peakCost = 0;
 
     const seriesDays: DailySeriesDay[] = dailyTrend
       .filter((b) => b.totalTokens > 0 || b.callCount > 0)
@@ -213,14 +177,8 @@ export const DailyUsageCard = memo(function DailyUsageCard({
           }
         });
 
-        for (const fp of byFamily.values()) {
-          if (fp.totalTokens > peakTokens) peakTokens = fp.totalTokens;
-          if (fp.estimatedCostUsd > peakCost) peakCost = fp.estimatedCostUsd;
-        }
-
         sumTokens += b.totalTokens;
         sumCost += b.estimatedCostUsd;
-
         return {
           bucketKey: b.bucketKey,
           label: b.label,
@@ -241,12 +199,9 @@ export const DailyUsageCard = memo(function DailyUsageCard({
       ),
       avgTokens: sumTokens / activeCount,
       avgCost: sumCost / activeCount,
-      maxModelTokens: peakTokens > 0 ? peakTokens * 1.1 : 1,
-      maxModelCost: peakCost > 0 ? peakCost * 1.1 : 1,
     };
   }, [dailyTrend]);
 
-  // 1.3. 共享的「按日 | 今日」粒度切换标签栏（按日覆盖当前所选周期全部活跃日）
   const granularityTabs = (
     <Tabs
       value={granularity}
@@ -254,17 +209,12 @@ export const DailyUsageCard = memo(function DailyUsageCard({
       aria-label="趋势时间范围切换"
     >
       <TabsList className="h-6 p-0.5">
-        <TabsTrigger value="7d" className="px-2 text-[11px]">
-          按日
-        </TabsTrigger>
-        <TabsTrigger value="today" className="px-2 text-[11px]">
-          今日
-        </TabsTrigger>
+        <TabsTrigger value="7d" className="px-2 text-[11px]">按日</TabsTrigger>
+        <TabsTrigger value="today" className="px-2 text-[11px]">今日</TabsTrigger>
       </TabsList>
     </Tabs>
   );
 
-  // 2.1. 若用户切换至「今日」，直接渲染今日单次节点调用增量折线图
   if (granularity === "today") {
     return (
       <ModelCallChart
@@ -284,7 +234,6 @@ export const DailyUsageCard = memo(function DailyUsageCard({
     );
   }
 
-  // 2.2. 「近7天」模式：渲染自适应双轴同显折线图（左主轴 Token 实线 ● + 右次轴 $ 费用虚线 ○，支持图例点击显隐）
   const visibleFamilies = families.filter((fam) => !hiddenFamilies.has(fam.familyKey));
   const visibleTokenVals: number[] = [];
   const visibleCostVals: number[] = [];
@@ -304,16 +253,11 @@ export const DailyUsageCard = memo(function DailyUsageCard({
 
   const plotW = Math.max(80, svgWidth - PAD_LEFT - PAD_RIGHT);
   const plotH = CHART_HEIGHT - PAD_TOP - PAD_BOTTOM;
-
-  const toX = (i: number): number =>
-    days.length <= 1
-      ? PAD_LEFT + plotW / 2
-      : PAD_LEFT + (i / (days.length - 1)) * plotW;
-
-  const toYToken = (v: number): number =>
+  const toX = (i: number) =>
+    days.length <= 1 ? PAD_LEFT + plotW / 2 : PAD_LEFT + (i / (days.length - 1)) * plotW;
+  const toYToken = (v: number) =>
     PAD_TOP + plotH - Math.min(1, Math.max(0, (v - tokenBounds.minY) / tokenSpan)) * plotH;
-
-  const toYCost = (v: number): number =>
+  const toYCost = (v: number) =>
     PAD_TOP + plotH - Math.min(1, Math.max(0, (v - costBounds.minY) / costSpan)) * plotH;
 
   const seriesList = visibleFamilies.map((fam) => {
@@ -325,20 +269,14 @@ export const DailyUsageCard = memo(function DailyUsageCard({
       const val = d.byFamily.get(fam.familyKey)?.estimatedCostUsd ?? 0;
       return { x: toX(idx), y: toYCost(val), val, idx };
     });
-
-    const tokenPoly = tokenPts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    const costPoly = costPts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-
-    const first = tokenPts[0];
-    const last = tokenPts[tokenPts.length - 1];
-    const tokenArea =
-      tokenPts.length >= 2 && first && last
-        ? `M ${first.x.toFixed(1)},${(PAD_TOP + plotH).toFixed(1)} L ${tokenPts
-            .map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`)
-            .join(" L ")} L ${last.x.toFixed(1)},${(PAD_TOP + plotH).toFixed(1)} Z`
-        : "";
-
-    return { fam, tokenPts, costPts, tokenPoly, costPoly, tokenArea };
+    return {
+      fam,
+      tokenPts,
+      costPts,
+      tokenLine: buildLinePath(tokenPts),
+      costLine: buildLinePath(costPts),
+      tokenArea: buildAreaPath(tokenPts, PAD_TOP + plotH),
+    };
   });
 
   const hoveredDay =
@@ -348,7 +286,7 @@ export const DailyUsageCard = memo(function DailyUsageCard({
   const activeX = hoveredDay && hoveredDayIdx !== null ? toX(hoveredDayIdx) : 0;
 
   return (
-    <Card className="min-w-0 gap-2 border-slate-200/80 bg-white py-2.5 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
+    <Card className={CHART_CARD_CLASS}>
       <CardHeader className="px-4 pb-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -360,34 +298,17 @@ export const DailyUsageCard = memo(function DailyUsageCard({
               {days.length} 活跃日 · 均 {formatTokens(avgTokens)} · {formatUsd(avgCost)}
             </Badge>
 
-            {/* 周期模型图例 + 主次双轴线型说明（均支持点击显隐） */}
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-0.5 text-[11px]">
-              {families.map((fam) => {
-                const isVisible = !hiddenFamilies.has(fam.familyKey);
-                return (
-                  <button
-                    key={fam.familyKey}
-                    type="button"
-                    onClick={() => toggleFamily(fam.familyKey)}
-                    aria-pressed={isVisible}
-                    title={`点击显示/隐藏 ${fam.label}`}
-                    className={`inline-flex cursor-pointer items-center gap-1 rounded px-1 py-0.5 font-medium tabular-nums transition-opacity ${
-                      isVisible
-                        ? "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70"
-                        : "text-slate-400 line-through opacity-45 hover:opacity-75 dark:text-slate-500"
-                    }`}
-                  >
-                    <span
-                      className="size-2 shrink-0 rounded-full"
-                      style={{ backgroundColor: fam.color }}
-                    />
-                    <span>{fam.label}</span>
-                    <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500">
-                      {formatUsd(fam.periodCostUsd)}
-                    </span>
-                  </button>
-                );
-              })}
+              {families.map((fam) => (
+                <ChartLegendToggle
+                  key={fam.familyKey}
+                  label={fam.label}
+                  color={fam.color}
+                  meta={formatUsd(fam.periodCostUsd)}
+                  visible={!hiddenFamilies.has(fam.familyKey)}
+                  onToggle={() => toggleFamily(fam.familyKey)}
+                />
+              ))}
               <button
                 type="button"
                 onClick={() => setShowTokens((v) => !v)}
@@ -423,9 +344,7 @@ export const DailyUsageCard = memo(function DailyUsageCard({
 
       <CardContent className="px-4">
         {days.length === 0 ? (
-          <div className="flex h-[152px] items-center justify-center rounded-md border border-dashed border-slate-200 text-xs text-slate-400 dark:border-slate-800">
-            当前周期暂无按日消耗记录
-          </div>
+          <ChartEmptyBox message="当前周期暂无按日消耗记录" />
         ) : (
           <div ref={wrapRef} className="relative w-full select-none">
             <svg
@@ -436,58 +355,39 @@ export const DailyUsageCard = memo(function DailyUsageCard({
               className="block w-full overflow-visible"
               onMouseLeave={() => setHoveredDayIdx(null)}
             >
-              <defs>
-                {families.map((fam) => {
-                  const gradId = `daily-dual-${fam.familyKey.replace(/[^a-z0-9]/gi, "-")}`;
-                  return (
-                    <linearGradient key={gradId} id={gradId} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={fam.color} stopOpacity="0.18" />
-                      <stop offset="100%" stopColor={fam.color} stopOpacity="0.01" />
-                    </linearGradient>
-                  );
-                })}
-              </defs>
+              <SvgAreaGradients
+                items={families.map((fam) => ({
+                  id: `daily-dual-${fam.familyKey.replace(/[^a-z0-9]/gi, "-")}`,
+                  color: fam.color,
+                  topOpacity: 0.18,
+                }))}
+              />
 
-              {/* 水平参考网格线 + 左主轴（Token）刻度 + 右次轴（$ USD）刻度 */}
-              {[0, 0.5, 1].map((ratio) => {
-                const tokenVal = tokenBounds.minY + tokenSpan * ratio;
-                const costVal = costBounds.minY + costSpan * ratio;
-                const y = PAD_TOP + plotH * (1 - ratio);
-                return (
-                  <g key={ratio}>
-                    <line
-                      x1={PAD_LEFT}
-                      y1={y}
-                      x2={svgWidth - PAD_RIGHT}
-                      y2={y}
-                      strokeDasharray={ratio === 0 ? undefined : "3 3"}
-                      className="stroke-slate-200/90 dark:stroke-slate-800"
-                    />
-                    {showTokens && (
-                      <text
-                        x={PAD_LEFT - 6}
-                        y={y + 3.5}
-                        textAnchor="end"
-                        className="fill-indigo-600/80 font-mono text-[10px] dark:fill-indigo-400/80"
-                      >
-                        {tokenVal <= 0 ? "0" : formatTokens(tokenVal)}
-                      </text>
-                    )}
-                    {showCost && (
-                      <text
-                        x={svgWidth - PAD_RIGHT + 6}
-                        y={y + 3.5}
-                        textAnchor="start"
-                        className="fill-amber-600/90 font-mono text-[10px] dark:fill-amber-400/90"
-                      >
-                        {costVal <= 0 ? "$0" : formatUsd(costVal)}
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
+              <SvgGridAxes
+                padLeft={PAD_LEFT}
+                padRight={PAD_RIGHT}
+                padTop={PAD_TOP}
+                plotH={plotH}
+                svgWidth={svgWidth}
+                leftLabelClassName="fill-indigo-600/80 font-mono text-[10px] dark:fill-indigo-400/80"
+                formatLeftLabel={
+                  showTokens
+                    ? (ratio) => {
+                        const v = tokenBounds.minY + tokenSpan * ratio;
+                        return v <= 0 ? "0" : formatTokens(v);
+                      }
+                    : undefined
+                }
+                formatRightLabel={
+                  showCost
+                    ? (ratio) => {
+                        const v = costBounds.minY + costSpan * ratio;
+                        return v <= 0 ? "$0" : formatUsd(v);
+                      }
+                    : undefined
+                }
+              />
 
-              {/* 底部 X 轴自然日刻度与纵向准星线 */}
               {days.map((d, idx) => {
                 const x = toX(idx);
                 const isHovered = hoveredDayIdx === idx;
@@ -522,33 +422,32 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                 );
               })}
 
-              {/* 左主轴：各模型每日 Token 渐变面积与实线 */}
               {showTokens &&
-                seriesList.map(({ fam, tokenArea, tokenPoly, tokenPts }) => {
+                seriesList.map(({ fam, tokenArea, tokenLine }) => {
                   const gradId = `daily-dual-${fam.familyKey.replace(/[^a-z0-9]/gi, "-")}`;
                   return (
                     <g key={`tok-${fam.familyKey}`}>
                       {tokenArea && <path d={tokenArea} fill={`url(#${gradId})`} />}
-                      {tokenPts.length >= 2 && (
-                        <polyline
+                      {tokenLine && (
+                        <path
+                          d={tokenLine}
                           fill="none"
                           stroke={fam.color}
                           strokeWidth={2.1}
                           strokeLinecap="round"
                           strokeLinejoin="round"
-                          points={tokenPoly}
                         />
                       )}
                     </g>
                   );
                 })}
 
-              {/* 右次轴：各模型每日美元费用虚线 */}
               {showCost &&
-                seriesList.map(({ fam, costPoly, costPts }) =>
-                  costPts.length >= 2 ? (
-                    <polyline
+                seriesList.map(({ fam, costLine }) =>
+                  costLine ? (
+                    <path
                       key={`cost-${fam.familyKey}`}
+                      d={costLine}
                       fill="none"
                       stroke={fam.color}
                       strokeWidth={1.8}
@@ -556,12 +455,10 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       opacity={0.9}
-                      points={costPoly}
                     />
                   ) : null
                 )}
 
-              {/* 左主轴：Token 实心圆点（●） */}
               {showTokens &&
                 seriesList.map(({ fam, tokenPts }) =>
                   tokenPts.map((p) => {
@@ -591,7 +488,6 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                   })
                 )}
 
-              {/* 右次轴：美元费用空心圆环节点（○） */}
               {showCost &&
                 seriesList.map(({ fam, costPts }) =>
                   costPts.map((p) => {
@@ -603,15 +499,14 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                         cx={p.x}
                         cy={p.y}
                         r={isHovered ? 4.6 : 3.2}
-                      stroke={fam.color}
-                      strokeWidth={isHovered ? 2.1 : 1.7}
-                      className="fill-white dark:fill-slate-950"
-                    />
-                  );
-                })
-              )}
+                        stroke={fam.color}
+                        strokeWidth={isHovered ? 2.1 : 1.7}
+                        className="fill-white dark:fill-slate-950"
+                      />
+                    );
+                  })
+                )}
 
-              {/* 按日感应热区：悬停弹出明细，点击「今日」节点可直接钻取至今日单次调用折线 */}
               {days.map((d, idx) => {
                 const x = toX(idx);
                 const sliceW = days.length <= 1 ? plotW : plotW / (days.length - 1);
@@ -633,18 +528,8 @@ export const DailyUsageCard = memo(function DailyUsageCard({
               })}
             </svg>
 
-            {/* 悬停任意自然日时浮出的分模型双轴明细卡片 */}
             {hoveredDay && (
-              <div
-                style={{
-                  left:
-                    activeX > svgWidth * 0.55
-                      ? `${Math.max(8, activeX - 252)}px`
-                      : `${Math.min(svgWidth - 252, activeX + 12)}px`,
-                  top: "4px",
-                }}
-                className="pointer-events-none absolute z-20 w-[244px] rounded-lg border border-slate-200 bg-white/95 p-2 text-[11px] shadow-md backdrop-blur-xs dark:border-slate-700 dark:bg-slate-900/95"
-              >
+              <ChartFloatingTooltip x={activeX} svgWidth={svgWidth} width={244} flipRatio={0.55}>
                 <div className="flex items-center justify-between gap-1 border-b border-slate-100 pb-1 dark:border-slate-800">
                   <span className="font-bold text-slate-900 tabular-nums dark:text-slate-100">
                     {hoveredDay.bucketKey} ({hoveredDay.weekdayLabel})
@@ -691,7 +576,7 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                     );
                   })}
                 </div>
-              </div>
+              </ChartFloatingTooltip>
             )}
           </div>
         )}

@@ -25,7 +25,6 @@ import { resolveModelStyle } from "@/components/ModelCallChart";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import {
   Tooltip,
   TooltipContent,
@@ -146,7 +145,7 @@ export const KpiCards = memo(function KpiCards({
             <Layers className="size-3.5 shrink-0 text-indigo-500" />
           </div>
 
-          <div className="flex items-baseline justify-between gap-1.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="cursor-default text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
@@ -162,7 +161,7 @@ export const KpiCards = memo(function KpiCards({
                 <TooltipTrigger asChild>
                   <Badge
                     variant="secondary"
-                    className="h-4 cursor-default border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
+                    className="h-4 max-w-full cursor-default border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
                   >
                     {quotaWindow.mode === "5h" || quotaWindow.mode === "prev-5h"
                       ? `7d周池 ${formatTokens(quotaWindow.active7dTokens)}`
@@ -186,7 +185,7 @@ export const KpiCards = memo(function KpiCards({
             ) : (
               <Badge
                 variant="secondary"
-                className="h-4 border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
+                className="h-4 max-w-full border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
               >
                 今日 {formatTokens(totals.todayTotalTokens)}
               </Badge>
@@ -215,23 +214,31 @@ export const KpiCards = memo(function KpiCards({
             <Zap className="size-3.5 shrink-0 text-emerald-500" />
           </div>
 
-          <div className="flex items-baseline justify-between gap-1.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
             <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
               {formatPercent(totals.cacheHitRate)}
             </span>
             <Badge
               variant="secondary"
-              className="h-4 border border-emerald-500/20 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 tabular-nums dark:bg-emerald-500/15 dark:text-emerald-300"
+              className="h-4 max-w-full border border-emerald-500/20 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 tabular-nums dark:bg-emerald-500/15 dark:text-emerald-300"
             >
               省 {formatUsd(totals.cacheSavedUsd)}
             </Badge>
           </div>
 
-          <Progress
+          <div
+            role="progressbar"
             aria-label="全局 Prompt 缓存命中率"
-            value={Math.min(100, Math.max(0, totals.cacheHitRate * 100))}
-            className="h-1 bg-slate-100 dark:bg-slate-800 [&_[data-slot=progress-indicator]]:bg-emerald-500"
-          />
+            aria-valuenow={Math.round(Math.min(100, Math.max(0, totals.cacheHitRate * 100)))}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="flex h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+          >
+            <div
+              style={{ width: `${Math.min(100, Math.max(0, totals.cacheHitRate * 100))}%` }}
+              className="bg-emerald-500 transition-all"
+            />
+          </div>
 
           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
             <span>缓存 {formatTokens(totals.cacheReadTokens)}</span>
@@ -248,7 +255,7 @@ export const KpiCards = memo(function KpiCards({
             <BrainCircuit className="size-3.5 shrink-0 text-violet-500" />
           </div>
 
-          <div className="flex items-baseline justify-between gap-1.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
             <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
               {formatTokens(totals.outputTokens)}
             </span>
@@ -345,13 +352,13 @@ export const KpiCards = memo(function KpiCards({
             </span>
           </div>
 
-          <div className="flex items-baseline justify-between gap-1.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
             <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
               {formatUsd(totals.estimatedCostUsd)}
             </span>
             <Badge
               variant="secondary"
-              className="h-4 border border-amber-500/20 bg-amber-500/10 px-1.5 text-[10px] text-amber-700 tabular-nums dark:bg-amber-500/15 dark:text-amber-300"
+              className="h-4 max-w-full border border-amber-500/20 bg-amber-500/10 px-1.5 text-[10px] text-amber-700 tabular-nums dark:bg-amber-500/15 dark:text-amber-300"
             >
               今日 {formatUsd(totals.todayEstimatedCostUsd)}
             </Badge>
@@ -420,10 +427,7 @@ export const KpiCards = memo(function KpiCards({
               <label className="inline-flex shrink-0 items-center gap-1 text-slate-500 dark:text-slate-400">
                 <span>周剩</span>
                 <Input
-                  type="number"
-                  min={0}
-                  max={99}
-                  step={1}
+                  type="text"
                   inputMode="decimal"
                   disabled={!canWriteWeeklyCalibration}
                   title={
@@ -438,14 +442,14 @@ export const KpiCards = memo(function KpiCards({
                   value={draftPct}
                   onChange={(e) => handleRemainingPctChange(e.target.value)}
                   onBlur={onDraftBlur}
-                  className="h-5 w-11 px-1 text-center font-mono text-[11px] tabular-nums"
+                  className="h-5 w-14 px-1.5 text-center font-mono text-[11px] tabular-nums"
                 />
                 <span>%</span>
               </label>
               {weeklyProjection && activeCalibration ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="truncate font-mono text-[10.5px] font-medium text-amber-700 dark:text-amber-300">
+                    <span className="min-w-0 font-mono text-[10.5px] leading-tight font-medium text-amber-700 dark:text-amber-300">
                       满额 ≈ {formatUsd(weeklyProjection.fullCostUsd)} ·{" "}
                       {formatTokens(weeklyProjection.fullTokens)}
                     </span>
@@ -453,7 +457,7 @@ export const KpiCards = memo(function KpiCards({
                   <TooltipContent className="max-w-xs space-y-1 p-2.5 text-[11px] tabular-nums">
                     <div className="font-medium">
                       按官方周剩 {activeCalibration.remainingPct}% 反算（已用{" "}
-                      {(100 - activeCalibration.remainingPct).toFixed(0)}%）
+                      {Number((100 - activeCalibration.remainingPct).toFixed(1))}%）
                     </div>
                     <div>
                       100% 周满额：{formatUsd(weeklyProjection.fullCostUsd)} ·{" "}

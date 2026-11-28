@@ -1,10 +1,10 @@
 /**
- * Input: React 副作用/状态/引用钩子、ConversationDetail/StepUsageRecord/ModelPriceRate 类型、@/lib/format 工具、resolveModelStyle 与 @/components/ui 弹窗/分隔线/表格组件。
+ * Input: React 钩子、ConversationDetail/StepUsageRecord 类型、@/lib/format 工具、SvgChartPrimitives 共享绘图原语、resolveModelStyle 与 @/components/ui 组件。
  * Output: 导出 ConversationDetailDialog 单会话逐轮 LLM 推理时间线与单步缓存率折线图模态框组件。
  * Pos: 会话级单步 Token、缓存命中率变化曲线、上下文窗口、延迟与数据源溯源详情弹窗（src/components/ConversationDetailDialog.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, Bot, Loader2, Percent, RefreshCw, Wrench } from "lucide-react";
 import type { ConversationDetail, StepUsageRecord } from "@/types/telemetry";
 import {
@@ -24,6 +24,18 @@ import {
   type StepCacheTtlAnnotation,
 } from "@/lib/cacheTtl";
 import { resolveModelStyle } from "@/components/ModelCallChart";
+import {
+  buildAreaPath,
+  buildLinePath,
+  ChartFloatingTooltip,
+  computeUniformTickIndices,
+  formatPercentTick,
+  resolveHoverIndexFromMouse,
+  SvgAreaGradients,
+  SvgCrosshair,
+  SvgGridAxes,
+  useContainerWidth,
+} from "@/components/SvgChartPrimitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,19 +54,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const STEP_CHART_HEIGHT = 86; // 会话单步缓存率折线 SVG 紧凑高度（像素，为竖屏下方明细让出更大滑动空间）
-const STEP_PAD_LEFT = 42; // 左侧百分比刻度留白
-const STEP_PAD_RIGHT = 12; // 右侧边缘留白
-const STEP_PAD_TOP = 10; // 顶部圆点防裁切留白
-const STEP_PAD_BOTTOM = 20; // 底部轮次横轴留白
+const STEP_CHART_HEIGHT = 86;
+const STEP_PAD_LEFT = 42;
+const STEP_PAD_RIGHT = 12;
+const STEP_PAD_TOP = 10;
+const STEP_PAD_BOTTOM = 20;
 
-/**
- * 职责：渲染单个会话内部逐轮 Prompt 缓存命中率（当步实线 + 累计虚线）交互折线图。
- * 思路：1) 复用 buildStepCacheRateSeries 与 computeAdaptivePercentBounds 计算自适应 5% 步进坐标系；
- *      2) 通过 ResizeObserver 适配窄分屏与宽屏弹窗宽度，提供悬停准星与逐轮明细浮窗。
- * 参数：steps — 会话单步序列；overallCacheHitRate — 会话整体缓存命中率（0 ~ 1）。
- * 返回值：紧凑圆角卡片包裹的 SVG 折线图节点。
- */
 function ConversationCacheRateChart({
   steps,
   overallCacheHitRate,
@@ -62,25 +67,9 @@ function ConversationCacheRateChart({
   steps: StepUsageRecord[];
   overallCacheHitRate: number;
 }) {
-  // 0. 容器实测像素宽度与当前悬停步索引
-  const wrapRef = useRef<HTMLDivElement | null>(null); // SVG 外层容器引用
-  const [svgWidth, setSvgWidth] = useState<number>(640); // 容器实测宽度（像素）
-  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null); // 当前悬停步骤下标
+  const { wrapRef, svgWidth } = useContainerWidth(true, 640);
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const updateWidth = () => {
-      const w = Math.round(el.getBoundingClientRect().width);
-      if (w > 120) setSvgWidth(w);
-    };
-    updateWidth();
-    const ro = new ResizeObserver(updateWidth);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // 1.1. 计算单步与累计缓存率时间序列、逐轮 TTL 标注、自适应纵轴边界与 SVG 坐标
   const chart = useMemo(() => {
     const { points, minRate, maxRate } = buildStepCacheRateSeries(steps);
     const ttlAnalysis = analyzeStepCacheTtl(steps, false);
@@ -114,39 +103,21 @@ function ConversationCacheRateChart({
       },
     }));
 
-    const stepLineD =
-      plotted.length >= 2
-        ? plotted.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.stepY.toFixed(1)}`).join(" ")
-        : "";
-    const baselineY = (STEP_PAD_TOP + plotH).toFixed(1);
-    const stepAreaD =
-      plotted.length >= 2
-        ? `${stepLineD} L${plotted[plotted.length - 1].x.toFixed(1)},${baselineY} L${plotted[0].x.toFixed(1)},${baselineY} Z`
-        : "";
-    const cumLineD =
-      plotted.length >= 2
-        ? plotted.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.cumY.toFixed(1)}`).join(" ")
-        : "";
-
-    const maxTicks = plotW < 360 ? 3 : 6;
-    const tickIndices =
-      plotted.length <= maxTicks
-        ? plotted.map((_, i) => i)
-        : [...new Set(Array.from({ length: maxTicks }, (_, i) => Math.round((i / (maxTicks - 1)) * (plotted.length - 1))))];
+    const stepPts = plotted.map((p) => ({ x: p.x, y: p.stepY }));
+    const cumPts = plotted.map((p) => ({ x: p.x, y: p.cumY }));
 
     return {
       plotted,
       minRate,
       maxRate,
       minY,
-      maxY,
       ySpan,
       plotW,
       plotH,
-      stepLineD,
-      stepAreaD,
-      cumLineD,
-      tickIndices,
+      stepLineD: buildLinePath(stepPts),
+      stepAreaD: buildAreaPath(stepPts, STEP_PAD_TOP + plotH),
+      cumLineD: buildLinePath(cumPts),
+      tickIndices: computeUniformTickIndices(plotted.length, plotW < 360 ? 3 : 6),
       ttlSummary: ttlAnalysis.summary,
     };
   }, [steps, svgWidth]);
@@ -155,7 +126,7 @@ function ConversationCacheRateChart({
     hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < chart.plotted.length
       ? chart.plotted[hoveredIdx]
       : null;
-  const dotRadius = chart.plotted.length <= 40 ? 2.8 : chart.plotted.length <= 100 ? 2.1 : 1.4; // 按轮次密度自适应圆点半径
+  const dotRadius = chart.plotted.length <= 40 ? 2.8 : chart.plotted.length <= 100 ? 2.1 : 1.4;
 
   return (
     <div className="min-w-0 shrink-0 rounded-lg border border-slate-200/80 bg-slate-50/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/70">
@@ -201,16 +172,11 @@ function ConversationCacheRateChart({
       <div
         ref={wrapRef}
         className="relative w-full select-none"
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const relX = e.clientX - rect.left - STEP_PAD_LEFT;
-          if (chart.plotted.length <= 1) {
-            setHoveredIdx(chart.plotted.length === 1 ? 0 : null);
-            return;
-          }
-          const ratio = Math.max(0, Math.min(1, relX / chart.plotW));
-          setHoveredIdx(Math.round(ratio * (chart.plotted.length - 1)));
-        }}
+        onMouseMove={(e) =>
+          setHoveredIdx(
+            resolveHoverIndexFromMouse(e, STEP_PAD_LEFT, chart.plotW, chart.plotted.length)
+          )
+        }
         onMouseLeave={() => setHoveredIdx(null)}
       >
         <svg
@@ -220,40 +186,19 @@ function ConversationCacheRateChart({
           aria-label="当前会话逐轮缓存命中率变化折线图"
           className="block w-full max-w-full cursor-crosshair overflow-visible"
         >
-          <defs>
-            <linearGradient id="conv-detail-cache-grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#10b981" stopOpacity="0.2" />
-              <stop offset="100%" stopColor="#10b981" stopOpacity="0.01" />
-            </linearGradient>
-          </defs>
+          <SvgAreaGradients
+            items={[{ id: "conv-detail-cache-grad", color: "#10b981", topOpacity: 0.2 }]}
+          />
 
-          {/* 水平参考网格线与自适应百分比 Y 轴刻度 */}
-          {[0, 0.5, 1].map((ratio) => {
-            const y = STEP_PAD_TOP + chart.plotH * (1 - ratio);
-            const tickVal = chart.minY + chart.ySpan * ratio;
-            return (
-              <g key={ratio}>
-                <line
-                  x1={STEP_PAD_LEFT}
-                  y1={y}
-                  x2={svgWidth - STEP_PAD_RIGHT}
-                  y2={y}
-                  strokeDasharray={ratio === 0 ? undefined : "3 3"}
-                  className="stroke-slate-200/90 dark:stroke-slate-800"
-                />
-                <text
-                  x={STEP_PAD_LEFT - 5}
-                  y={y + 3.5}
-                  textAnchor="end"
-                  className="fill-slate-400 font-mono text-[10px] dark:fill-slate-500"
-                >
-                  {`${Number.isInteger(tickVal) ? tickVal : tickVal.toFixed(1)}%`}
-                </text>
-              </g>
-            );
-          })}
+          <SvgGridAxes
+            padLeft={STEP_PAD_LEFT}
+            padRight={STEP_PAD_RIGHT}
+            padTop={STEP_PAD_TOP}
+            plotH={chart.plotH}
+            svgWidth={svgWidth}
+            formatLeftLabel={(ratio) => formatPercentTick(chart.minY + chart.ySpan * ratio)}
+          />
 
-          {/* 底部轮次 X 轴刻度 */}
           {chart.tickIndices.map((idx, pos) => {
             const pt = chart.plotted[idx];
             if (!pt) return null;
@@ -278,7 +223,6 @@ function ConversationCacheRateChart({
             );
           })}
 
-          {/* 当步缓存率渐变填充与实线 + 累计缓存率虚线 */}
           {chart.stepAreaD && <path d={chart.stepAreaD} fill="url(#conv-detail-cache-grad)" />}
           {chart.cumLineD && (
             <path
@@ -302,20 +246,8 @@ function ConversationCacheRateChart({
             />
           )}
 
-          {/* 悬停竖向准星 */}
-          {active && (
-            <line
-              x1={active.x}
-              y1={STEP_PAD_TOP}
-              x2={active.x}
-              y2={STEP_PAD_TOP + chart.plotH}
-              strokeDasharray="3 2"
-              strokeWidth={1}
-              className="stroke-slate-400 dark:stroke-slate-500"
-            />
-          )}
+          {active && <SvgCrosshair x={active.x} padTop={STEP_PAD_TOP} plotH={chart.plotH} />}
 
-          {/* 逐轮圆点（TTL 失效断崖节点高亮玫瑰红） */}
           {chart.plotted.map((pt, idx) => {
             const isHovered = hoveredIdx === idx;
             const isExpired = pt.ttl.status === "expired";
@@ -343,18 +275,8 @@ function ConversationCacheRateChart({
           })}
         </svg>
 
-        {/* 悬停单步缓存命中率明细浮窗 */}
         {active && (
-          <div
-            style={{
-              left:
-                active.x > svgWidth * 0.56
-                  ? `${Math.max(4, active.x - 224)}px`
-                  : `${Math.min(Math.max(4, svgWidth - 224), active.x + 10)}px`,
-              top: "2px",
-            }}
-            className="pointer-events-none absolute z-20 w-[216px] rounded-lg border border-slate-200 bg-white/95 p-2 text-[11px] shadow-md backdrop-blur-xs dark:border-slate-700 dark:bg-slate-900/95"
-          >
+          <ChartFloatingTooltip x={active.x} svgWidth={svgWidth} width={216} top={2} flipRatio={0.56}>
             <div className="flex items-center justify-between gap-1 font-mono text-[10px] text-slate-400">
               <span>#{active.step.callIndex + 1}</span>
               <span>{formatDateTime(active.step.timestamp)}</span>
@@ -404,7 +326,7 @@ function ConversationCacheRateChart({
                 </span>
               </div>
             )}
-          </div>
+          </ChartFloatingTooltip>
         )}
       </div>
     </div>

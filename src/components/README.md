@@ -2,6 +2,7 @@
 
 - `SourceSwitcherBar.tsx`｜多账号总览切换条、同账号合并标记、分账号费用/Token 明细与 7d 周剩百分比直览（移动端友好）
 - `KpiCards.tsx`｜顶部四卡与周剩余 `%` 满额反算（支持按账号隔离周校准与移动端紧凑排版）
+- `SvgChartPrimitives.tsx`｜5 张 SVG 折线图共享底座（容器宽度监听、图例显隐持久化、网格坐标轴、渐变定义、准星与防溢出浮窗）
 - `DailyUsageCard.tsx`｜每日双轴 / 今日单次消耗折线
 - `CacheHitRateCard.tsx`｜缓存命中率（今日 / 近7天 / TTL 衰减切换）
 - `CacheTtlPanel.tsx`｜实测缓存 TTL 衰减曲线与各项目速览

@@ -1,14 +1,26 @@
 /**
- * Input: CacheTtlSummary 与 WorkspaceUsageBreakdown 类型、@/lib/cacheTtl 格式化函数、@/lib/format 百分比格式化与 @/components/ui 卡片/徽章组件。
+ * Input: CacheTtlSummary 与 WorkspaceUsageBreakdown 类型、@/lib/cacheTtl 格式化函数、@/lib/format 工具、SvgChartPrimitives 共享绘图原语与 @/components/ui 组件。
  * Output: 导出 CacheTtlPanel 缓存 TTL 衰减折线图与各项目上一次有效时长速览组件。
  * Pos: 挂载于 CacheHitRateCard「TTL 衰减」标签页下的专项可视化视图（src/components/CacheTtlPanel.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Timer } from "lucide-react";
 import type { CacheTtlSummary, WorkspaceUsageBreakdown } from "@/types/telemetry";
 import { formatCompactGap } from "@/lib/cacheTtl";
 import { formatDateTime, formatPercent } from "@/lib/format";
+import {
+  buildAreaPath,
+  buildLinePath,
+  CHART_CARD_CLASS,
+  ChartEmptyBox,
+  ChartFloatingTooltip,
+  resolveHoverIndexFromMouse,
+  SvgAreaGradients,
+  SvgCrosshair,
+  SvgGridAxes,
+  useContainerWidth,
+} from "@/components/SvgChartPrimitives";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -19,28 +31,20 @@ export interface CacheTtlPanelProps {
   leadingTabsSlot: React.ReactNode; // 顶部粒度切换 Tabs 插槽（近7天 / 今日 / TTL 衰减）
 }
 
-const CHART_HEIGHT = 152; // 与 CacheHitRateCard 保持严格等高（像素）
-const PAD_LEFT = 46; // 左侧 0%–100% 刻度留白
-const PAD_RIGHT = 18; // 右侧边缘留白
-const PAD_TOP = 12; // 顶部圆点留白
-const PAD_BOTTOM = 22; // 底部空闲分桶横轴留白
+const CHART_HEIGHT = 152;
+const PAD_LEFT = 46;
+const PAD_RIGHT = 18;
+const PAD_TOP = 12;
+const PAD_BOTTOM = 22;
 
-/**
- * 职责：渲染缓存 TTL 随空闲间隔衰减的交互折线图及各项目「上次缓存有效/失效时长」速览条。
- * 思路：1) 支持「全部项目」与任意单项目一键切换；2) 横轴固定 6 档空闲间隔，纵轴 0%–100% 并附 50% 保活分水岭虚线；
- *      3) 底部横向 pill 列出各项目上一次实测保活/失效跨度，点击直达该项目衰减曲线。
- * 参数：props — 全局 cacheTtl、byWorkspace 列表与顶部 Tabs 插槽。
- * 返回值：shadcn Card 包裹的 TTL 衰减折线卡片。
- */
 export function CacheTtlPanel({
   cacheTtl,
   byWorkspace,
   leadingTabsSlot,
 }: CacheTtlPanelProps) {
-  const [selectedWs, setSelectedWs] = useState<string>(""); // 空串表示全部项目
+  const [selectedWs, setSelectedWs] = useState<string>("");
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [svgWidth, setSvgWidth] = useState<number>(640);
+  const { wrapRef, svgWidth } = useContainerWidth(true, 640);
 
   const workspacesWithTtl = useMemo(
     () =>
@@ -50,7 +54,6 @@ export function CacheTtlPanel({
     [byWorkspace]
   );
 
-  // 若筛选切换后当前选中的项目已不在列表中，自动回退全部项目
   const effectiveWs = useMemo(
     () =>
       selectedWs && workspacesWithTtl.some((w) => w.workspaceName === selectedWs)
@@ -59,28 +62,15 @@ export function CacheTtlPanel({
     [selectedWs, workspacesWithTtl]
   );
 
-  const activeSummary: CacheTtlSummary | undefined = useMemo(() => {
-    if (effectiveWs) {
-      return workspacesWithTtl.find((w) => w.workspaceName === effectiveWs)?.cacheTtl;
-    }
-    return cacheTtl;
-  }, [effectiveWs, workspacesWithTtl, cacheTtl]);
+  const activeSummary: CacheTtlSummary | undefined = useMemo(
+    () =>
+      effectiveWs
+        ? workspacesWithTtl.find((w) => w.workspaceName === effectiveWs)?.cacheTtl
+        : cacheTtl,
+    [effectiveWs, workspacesWithTtl, cacheTtl]
+  );
 
   const buckets = activeSummary?.buckets ?? [];
-
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const updateWidth = () => {
-      const w = Math.round(el.getBoundingClientRect().width);
-      if (w > 120) setSvgWidth(w);
-    };
-    updateWidth();
-    const ro = new ResizeObserver(updateWidth);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
   const plotW = Math.max(80, svgWidth - PAD_LEFT - PAD_RIGHT);
   const plotH = CHART_HEIGHT - PAD_TOP - PAD_BOTTOM;
   const toX = (i: number) =>
@@ -96,14 +86,8 @@ export function CacheTtlPanel({
     hasData: b.sampleCount > 0,
   }));
   const validPts = plotted.filter((p) => p.hasData);
-  const lineD =
-    validPts.length >= 2
-      ? validPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")
-      : "";
-  const areaD =
-    validPts.length >= 2
-      ? `${lineD} L${validPts[validPts.length - 1].x.toFixed(1)},${(PAD_TOP + plotH).toFixed(1)} L${validPts[0].x.toFixed(1)},${(PAD_TOP + plotH).toFixed(1)} Z`
-      : "";
+  const lineD = buildLinePath(validPts);
+  const areaD = buildAreaPath(validPts, PAD_TOP + plotH);
 
   const hovered =
     hoveredIdx !== null && hoveredIdx >= 0 && hoveredIdx < plotted.length
@@ -120,10 +104,7 @@ export function CacheTtlPanel({
     if (robustExp !== null && robustExp !== undefined) {
       parts.push(`失效中位 ${formatCompactGap(robustExp)}`);
     }
-    if (parts.length === 0) {
-      parts.push(`${activeSummary.sampleCount} 笔样本`);
-    }
-    return parts.join(" · ");
+    return parts.length > 0 ? parts.join(" · ") : `${activeSummary.sampleCount} 笔样本`;
   }, [activeSummary]);
 
   const keepWarmHint = useMemo(() => {
@@ -133,7 +114,7 @@ export function CacheTtlPanel({
   }, [activeSummary]);
 
   return (
-    <Card className="min-w-0 gap-2 border-slate-200/80 bg-white py-2.5 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
+    <Card className={CHART_CARD_CLASS}>
       <CardHeader className="px-4 pb-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -169,20 +150,14 @@ export function CacheTtlPanel({
 
       <CardContent className="space-y-1.5 px-4 pt-0">
         {!activeSummary || activeSummary.sampleCount === 0 || validPts.length === 0 ? (
-          <div className="flex h-[152px] items-center justify-center rounded-md border border-dashed border-slate-200 text-xs text-slate-400 dark:border-slate-800 dark:text-slate-500">
-            暂无有效间隔样本
-          </div>
+          <ChartEmptyBox message="暂无有效间隔样本" />
         ) : (
           <div
             ref={wrapRef}
             className="relative w-full select-none"
-            onMouseMove={(e) => {
-              if (plotted.length === 0) return;
-              const rect = e.currentTarget.getBoundingClientRect();
-              const relX = e.clientX - rect.left - PAD_LEFT;
-              const ratio = Math.max(0, Math.min(1, relX / plotW));
-              setHoveredIdx(Math.round(ratio * (plotted.length - 1)));
-            }}
+            onMouseMove={(e) =>
+              setHoveredIdx(resolveHoverIndexFromMouse(e, PAD_LEFT, plotW, plotted.length))
+            }
             onMouseLeave={() => setHoveredIdx(null)}
           >
             <svg
@@ -192,48 +167,28 @@ export function CacheTtlPanel({
               aria-label="Prompt 缓存命中率随空闲间隔衰减折线图"
               className="block w-full max-w-full cursor-crosshair overflow-visible"
             >
-              <defs>
-                <linearGradient id="ttl-decay-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#10b981" stopOpacity="0.2" />
-                  <stop offset="100%" stopColor="#f43f5e" stopOpacity="0.03" />
-                </linearGradient>
-              </defs>
+              <SvgAreaGradients
+                items={[
+                  {
+                    id: "ttl-decay-grad",
+                    color: "#10b981",
+                    topOpacity: 0.2,
+                    bottomColor: "#f43f5e",
+                    bottomOpacity: 0.03,
+                  },
+                ]}
+              />
 
-              {/* 0% / 50% (保活分水岭) / 100% 参考网格线 */}
-              {[0, 0.5, 1].map((rate) => {
-                const y = toY(rate);
-                const isThreshold = rate === 0.5;
-                return (
-                  <g key={rate}>
-                    <line
-                      x1={PAD_LEFT}
-                      y1={y}
-                      x2={svgWidth - PAD_RIGHT}
-                      y2={y}
-                      strokeDasharray={isThreshold ? "4 3" : rate === 0 ? undefined : "3 3"}
-                      className={
-                        isThreshold
-                          ? "stroke-amber-400/70 dark:stroke-amber-500/50"
-                          : "stroke-slate-200/90 dark:stroke-slate-800"
-                      }
-                    />
-                    <text
-                      x={PAD_LEFT - 6}
-                      y={y + 3.5}
-                      textAnchor="end"
-                      className={
-                        isThreshold
-                          ? "fill-amber-600 font-mono text-[10px] dark:fill-amber-400"
-                          : "fill-slate-400 font-mono text-[10px] dark:fill-slate-500"
-                      }
-                    >
-                      {`${Math.round(rate * 100)}%`}
-                    </text>
-                  </g>
-                );
-              })}
+              <SvgGridAxes
+                padLeft={PAD_LEFT}
+                padRight={PAD_RIGHT}
+                padTop={PAD_TOP}
+                plotH={plotH}
+                svgWidth={svgWidth}
+                highlightRatio={0.5}
+                formatLeftLabel={(ratio) => `${Math.round(ratio * 100)}%`}
+              />
 
-              {/* 底部空闲间隔分桶 X 轴刻度 */}
               {plotted.map((pt, idx) => (
                 <text
                   key={pt.key}
@@ -252,7 +207,6 @@ export function CacheTtlPanel({
                 </text>
               ))}
 
-              {/* 衰减折线与面积填充 */}
               {areaD && <path d={areaD} fill="url(#ttl-decay-grad)" />}
               {lineD && (
                 <path
@@ -265,20 +219,8 @@ export function CacheTtlPanel({
                 />
               )}
 
-              {/* 悬停竖向准星 */}
-              {hovered && (
-                <line
-                  x1={hovered.x}
-                  y1={PAD_TOP}
-                  x2={hovered.x}
-                  y2={PAD_TOP + plotH}
-                  strokeDasharray="3 2"
-                  strokeWidth={1}
-                  className="stroke-slate-400 dark:stroke-slate-500"
-                />
-              )}
+              {hovered && <SvgCrosshair x={hovered.x} padTop={PAD_TOP} plotH={plotH} />}
 
-              {/* 各档位圆点与样本数提示 */}
               {plotted.map((pt) => {
                 if (!pt.hasData) return null;
                 const isHot = hoveredIdx === pt.idx;
@@ -298,18 +240,8 @@ export function CacheTtlPanel({
               })}
             </svg>
 
-            {/* 悬停分桶明细气泡 */}
             {hovered && (
-              <div
-                style={{
-                  left:
-                    hovered.x > svgWidth * 0.56
-                      ? `${Math.max(4, hovered.x - 208)}px`
-                      : `${Math.min(Math.max(4, svgWidth - 208), hovered.x + 10)}px`,
-                  top: "4px",
-                }}
-                className="pointer-events-none absolute z-20 w-[198px] rounded-lg border border-slate-200 bg-white/95 p-2 text-[11px] shadow-md backdrop-blur-xs dark:border-slate-700 dark:bg-slate-900/95"
-              >
+              <ChartFloatingTooltip x={hovered.x} svgWidth={svgWidth} width={198} flipRatio={0.56}>
                 <div className="flex items-center justify-between font-mono text-[10px] text-slate-400">
                   <span>空闲间隔 {hovered.label}</span>
                   <span>{effectiveWs || "全部项目"}</span>
@@ -338,12 +270,11 @@ export function CacheTtlPanel({
                 ) : (
                   <div className="mt-1 text-[10px] text-slate-400">该间隔档位暂无样本</div>
                 )}
-              </div>
+              </ChartFloatingTooltip>
             )}
           </div>
         )}
 
-        {/* 各项目上次 TTL 有效时长速览条（点击切换对应项目衰减曲线） */}
         {workspacesWithTtl.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-1.5 text-[10.5px] dark:border-slate-800/80">
             <button

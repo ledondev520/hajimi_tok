@@ -1,7 +1,7 @@
 /**
  * Input: node:crypto、node:fs、node:http、node:path、node:url、node:zlib 与 TelemetryProvider 领域服务接口。
- * Output: 导出 createTelemetryHttpServer HTTP 服务工厂、parseSummaryQuery 查询参数解析与 serializeConversationsCsv 导出函数。
- * Pos: 服务端只读 HTTP API 路由层、CSV/JSON 报表导出层与前端静态资源安全托管层。
+ * Output: 导出 createTelemetryHttpServer HTTP 服务工厂与 parseSummaryQuery 查询参数解析函数。
+ * Pos: 服务端只读 HTTP API 路由层与前端静态资源安全托管层。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 
@@ -12,7 +12,6 @@ import path from "node:path";
 import { URL } from "node:url";
 import zlib from "node:zlib";
 import type {
-  ConversationUsageSummary,
   QuotaCycleMode,
   TelemetryFilterOptions,
   TelemetryProvider,
@@ -44,26 +43,6 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8",
 }; // 静态文件后缀到 Content-Type 响应头的映射表
-
-const CSV_COLUMNS = [
-  "conversationId",
-  "title",
-  "workspaceName",
-  "primaryModel",
-  "callCount",
-  "inputTokens",
-  "cacheReadTokens",
-  "outputTokens",
-  "thinkingTokens",
-  "responseTokens",
-  "totalTokens",
-  "cacheHitRate",
-  "estimatedCostUsd",
-  "cacheSavedUsd",
-  "parentConversationId",
-  "archived",
-  "lastModifiedAt",
-] as const; // CSV 导出固定表头字段序列
 
 /**
  * 职责：校验请求 Host 头是否为合法本地回环地址（防御 DNS Rebinding）。
@@ -240,61 +219,6 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
     forceRefresh,
     ...(nodeLimit !== undefined ? { nodeLimit } : {}),
   };
-}
-
-/**
- * 职责：对单个 CSV 单元格执行电子表格公式注入防护与 RFC 4180 转义（保留数值列语义）。
- * 参数：value — 原始字段值（字符串、数值或布尔值）。
- * 返回值：安全转义后的 CSV 单元格文本。
- */
-function escapeCsvCell(value: string | number | boolean): string {
-  // 0. 统一转换为字符串形式，对以 = + - @ 开头的文本单元格加前导单引号阻断电子表格公式执行
-  let text = String(value ?? "");
-  if (typeof value === "string" && /^[\t\r ]*[=+\-@]/.test(text)) {
-    text = `'${text}`;
-  }
-  // 1.1. 包含双引号、逗号或回车换行时，内部双引号双写并在外层加双引号
-  if (/[",\r\n]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
-}
-
-/**
- * 职责：将会话汇总列表编码为带 UTF-8 BOM 的 CSV 文本（保障 macOS Excel 中文正常显示）。
- * 参数：conversations — 已过滤的会话汇总数组。
- * 返回值：以 \uFEFF 开头的完整 CSV 字符串。
- */
-export function serializeConversationsCsv(conversations: ConversationUsageSummary[]): string {
-  // 0. 构建首行字段名表头
-  const lines: string[] = [CSV_COLUMNS.join(",")];
-
-  // 1.1. 逐条映射会话属性并做 CSV 单元格转义
-  for (const item of conversations) {
-    const row = [
-      item.conversationId,
-      item.title,
-      item.workspaceName,
-      item.primaryModel,
-      item.callCount,
-      item.inputTokens,
-      item.cacheReadTokens,
-      item.outputTokens,
-      item.thinkingTokens,
-      item.responseTokens,
-      item.totalTokens,
-      item.cacheHitRate,
-      item.estimatedCostUsd,
-      item.cacheSavedUsd,
-      item.parentConversationId,
-      item.archived,
-      item.lastModifiedAt,
-    ].map(escapeCsvCell);
-    lines.push(row.join(","));
-  }
-
-  // 2. 拼接 UTF-8 BOM 前缀返回
-  return `\uFEFF${lines.join("\n")}`;
 }
 
 /**
@@ -651,28 +575,7 @@ export function createTelemetryHttpServer(
         return;
       }
 
-      // 1.4. JSON 与 UTF-8 BOM CSV 导出路由
-      if (pathname === "/api/export.json") {
-        const summary = provider.getSummary(parseSummaryQuery(url));
-        replyJson(200, summary, {
-          "Content-Disposition": 'attachment; filename="antigravity-tokens.json"',
-        });
-        return;
-      }
-
-      if (pathname === "/api/export.csv") {
-        const summary = provider.getSummary(parseSummaryQuery(url));
-        const csvPayload = serializeConversationsCsv(summary.conversations);
-        setCorsHeaders(res, trustedOrigin);
-        res.writeHead(200, {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": 'attachment; filename="antigravity-tokens.csv"',
-        });
-        res.end(csvPayload);
-        return;
-      }
-
-      // 1.5. 未匹配的其他 /api/* 路径一律返回 404 JSON，避免误落入 SPA 回退
+      // 1.4. 未匹配的其他 /api/* 路径一律返回 404 JSON，避免误落入 SPA 回退
       if (pathname.startsWith("/api/")) {
         replyJson(404, { error: "API endpoint not found" });
         return;

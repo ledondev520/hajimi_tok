@@ -1,6 +1,6 @@
 /**
  * Input: vitest 断言工具、node:fs/http/os/path 模块，以及 server/app.ts 与 server/cliRender.ts 待测模块。
- * Output: 验证 HTTP 遥测服务路由、查询转发、UTF-8 BOM CSV 转义、静态安全托管与 CLI 解析渲染的完整测试套件。
+ * Output: 验证 HTTP 遥测服务路由、查询转发、来源安全边界、静态安全托管与 CLI 解析渲染的完整测试套件。
  * Pos: 服务端 API 层与终端 CLI 展示层的自动化契约与回归测试。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -126,7 +126,6 @@ function createMockProviderFixture(shouldThrow = false): {
     },
     callTimeline: [],
     dailyTrend: [],
-    hourlyTrend: [],
     byModel: [
       {
         modelName: "Gemini 4 Argon (High)",
@@ -165,11 +164,9 @@ function createMockProviderFixture(shouldThrow = false): {
         shareOfTotalTokens: 1,
       },
     ],
-    topTools: [{ toolName: "view_file", invocationCount: 4, associatedOutputTokens: 1800 }],
     conversations,
     availableWorkspaces: ["token"],
     availableModels: ["Gemini 4 Argon (High)", "Claude Opus 5.5 (Medium)"],
-    defaultPricing: [],
   };
 
   const provider: TelemetryProvider = {
@@ -285,30 +282,6 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
     const missingRes = await fetch(`${baseUrl}/api/conversations/non-existent-id`);
     expect(missingRes.status).toBe(404);
     expect(await missingRes.json()).toEqual({ error: "Conversation not found" });
-  });
-
-  it("exports UTF-8 BOM CSV with escaped quotes/commas and attachment JSON", async () => {
-    const { baseUrl } = await startServer(createMockProviderFixture().provider);
-
-    const csvRes = await fetch(`${baseUrl}/api/export.csv`);
-    expect(csvRes.status).toBe(200);
-    expect(csvRes.headers.get("content-disposition")).toContain("antigravity-tokens.csv");
-    const rawBuffer = Buffer.from(await csvRes.arrayBuffer());
-    expect(Array.from(rawBuffer.subarray(0, 3))).toEqual([0xef, 0xbb, 0xbf]);
-
-    const lines = rawBuffer.toString("utf8").slice(1).split("\n");
-    expect(lines).toHaveLength(3);
-    expect(lines[0]).toBe(
-      "conversationId,title,workspaceName,primaryModel,callCount,inputTokens,cacheReadTokens,outputTokens,thinkingTokens,responseTokens,totalTokens,cacheHitRate,estimatedCostUsd,cacheSavedUsd,parentConversationId,archived,lastModifiedAt",
-    );
-    expect(lines[1]).toContain('"构建 ""AntiGravity"" Token 看板, 支持 CSV 导出"');
-
-    const jsonExportRes = await fetch(`${baseUrl}/api/export.json?includeArchived=false`);
-    expect(jsonExportRes.status).toBe(200);
-    expect(jsonExportRes.headers.get("content-disposition")).toBe(
-      'attachment; filename="antigravity-tokens.json"',
-    );
-    expect(((await jsonExportRes.json()) as DashboardSummaryPayload).conversations).toHaveLength(1);
   });
 
   it("serves static files securely, blocks path traversal, and returns 500 on runtime errors", async () => {
@@ -526,20 +499,13 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
       });
       expect(badHostStatus).toBe(403);
 
-      // 3. CSV 公式注入防护：字符串列以 = + - @ 开头加单引号，数值列保持数值语义
-      const csvText = (await (await fetch(`${baseUrl}/api/export.csv`)).text()).slice(1);
-      const dataRow = csvText.split("\n")[1] || "";
-      expect(dataRow).toContain("\"'=HYPERLINK(\"\"http://evil.test\"\",\"\"click\"\")\"");
-      expect(dataRow).toContain(",'+ws,");
-      expect(dataRow).toContain(",146400,");
-
-      // 4. 指向静态目录外的符号链接拒绝读取（含 SPA 回退 index.html）
+      // 3. 指向静态目录外的符号链接拒绝读取（含 SPA 回退 index.html）
       expect((await fetch(`${baseUrl}/leak.txt`)).status).toBe(403);
       fs.unlinkSync(path.join(tmpDir, "index.html"));
       fs.symlinkSync(outsideFile, path.join(tmpDir, "index.html"));
       expect((await fetch(`${baseUrl}/spa/unknown-route`)).status).toBe(403);
 
-      // 5. POST /api/resets 非法 pool 枚举返回 400
+      // 4. POST /api/resets 非法 pool 枚举返回 400
       const badPoolRes = await fetch(`${baseUrl}/api/resets`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

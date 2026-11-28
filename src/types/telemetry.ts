@@ -193,13 +193,6 @@ export interface WorkspaceUsageBreakdown {
   cacheTtl?: CacheTtlSummary; // 该项目维度实测缓存 TTL 摘要与 6 档衰减曲线
 }
 
-/** 工具调用与 Token 关联分布项 */
-export interface ToolUsageBreakdown {
-  toolName: string; // 工具名（如 run_command、read_file）
-  invocationCount: number; // 调用总次数
-  associatedOutputTokens: number; // 触发该工具所在轮次的输出 Token
-}
-
 /** 全局 KPI 汇总指标 */
 export interface GlobalKpiTotals {
   conversationCount: number; // 命中筛选条件的会话总数
@@ -333,14 +326,11 @@ export interface DashboardSummaryPayload {
   quotaWindow?: QuotaCycleInfo; // 当前选中配额池的 5h/7d 周期窗口与预计重置信息
   callTimeline: CallNodePoint[]; // 按时间升序排列的模型调用增量节点序列
   dailyTrend: UsageTimeBucket[]; // 按天趋势桶
-  hourlyTrend: UsageTimeBucket[]; // 最近按小时趋势桶
   byModel: ModelUsageBreakdown[]; // 模型拆解列表
   byWorkspace: WorkspaceUsageBreakdown[]; // 项目工作区拆解列表
-  topTools: ToolUsageBreakdown[]; // 高频工具排行
   conversations: ConversationUsageSummary[]; // 会话列表（默认按最近活跃或总消耗排序）
   availableWorkspaces: string[]; // 全量可选工作区筛选项
   availableModels: string[]; // 全量可选模型筛选项
-  defaultPricing: ModelPriceRate[]; // 服务端默认单价表
   cacheTtl?: CacheTtlSummary; // 当前筛选范围全局实测缓存 TTL 摘要与 6 档衰减曲线
   liveQuota?: Record<string, LivePoolQuotaSnapshot>; // 若本机装有 agy CLI 并接入 statusLine，返回各池实时官方周剩余
   activeSource?: string; // 当前选中的数据源 ID（多源模式下为 "all" 或单账号 ID）

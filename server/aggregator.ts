@@ -16,7 +16,6 @@ import type {
   StepUsageRecord,
   TelemetryFilterOptions,
   TelemetryProvider,
-  ToolUsageBreakdown,
   UsageTimeBucket,
   WorkspaceUsageBreakdown,
 } from "../src/types/telemetry";
@@ -44,35 +43,24 @@ export { matchesModelQuery, resolveQuotaCycleBlocks };
 const MAX_CALL_TIMELINE_NODES = 5000; // 折线图返回的调用节点上限，确保几千轮长程工作也能完整查看全量节点曲线
 const RAW_TTL_CACHE = new WeakMap<StepUsageRecord[], ReturnType<typeof analyzeStepCacheTtl>>(); // 按会话原始步骤引用缓存 TTL 解析结果
 
-const BUCKET_KEY_CACHE = new Map<
-  number,
-  { dayKey: string; dayLabel: string; hourKey: string; hourLabel: string }
->(); // 半小时槽 -> 本地日/小时桶键缓存（消除数万步重复 new Date 分配）
+const BUCKET_KEY_CACHE = new Map<number, { dayKey: string; dayLabel: string }>(); // 半小时槽 -> 本地日桶键缓存（消除数万步重复 new Date 分配）
 
 /**
- * 职责：将毫秒时间戳转换为本地时区的 YYYY-MM-DD 日期键与小时键（带半小时槽缓存，兼容半小时偏移时区）。
+ * 职责：将毫秒时间戳转换为本地时区的 YYYY-MM-DD 日期键（带半小时槽缓存，兼容半小时偏移时区）。
  * 参数：tsMs — 毫秒时间戳（无效时回退当前时刻）。
- * 返回值：{ dayKey, dayLabel, hourKey, hourLabel }。
+ * 返回值：{ dayKey, dayLabel }。
  */
-function toLocalBucketKeys(tsMs: number): { dayKey: string; dayLabel: string; hourKey: string; hourLabel: string } {
+function toLocalBucketKeys(tsMs: number): { dayKey: string; dayLabel: string } {
   const safeMs = Number.isFinite(tsMs) && tsMs > 0 ? tsMs : Date.now();
   const slot = Math.floor(safeMs / 1_800_000);
   const hit = BUCKET_KEY_CACHE.get(slot);
   if (hit) return hit;
 
-  // 0. 解析时间并补齐两位月、日、时
   const valid = new Date(safeMs);
   const pad = (n: number) => String(n).padStart(2, "0");
-  const yyyy = valid.getFullYear();
   const mm = pad(valid.getMonth() + 1);
   const dd = pad(valid.getDate());
-  const hh = pad(valid.getHours());
-  const out = {
-    dayKey: `${yyyy}-${mm}-${dd}`,
-    dayLabel: `${mm}-${dd}`,
-    hourKey: `${yyyy}-${mm}-${dd} ${hh}:00`,
-    hourLabel: `${hh}:00`,
-  };
+  const out = { dayKey: `${valid.getFullYear()}-${mm}-${dd}`, dayLabel: `${mm}-${dd}` };
   if (BUCKET_KEY_CACHE.size >= 512) BUCKET_KEY_CACHE.clear();
   BUCKET_KEY_CACHE.set(slot, out);
   return out;
@@ -362,7 +350,6 @@ export function createTelemetryService(
       }> = [];
       const todayKey = toLocalBucketKeys(nowMs).dayKey;
       const dayMap = new Map<string, UsageTimeBucket>();
-      const hourMap = new Map<string, UsageTimeBucket>();
       const modelAgg = new Map<
         string,
         ModelUsageBreakdown & { convIds: Set<string>; latencySum: number; timedCalls: number; timedOut: number; timedLatMs: number; streamOut: number; streamMs: number }
@@ -371,7 +358,6 @@ export function createTelemetryService(
       const wsTtlObsMap = new Map<string, CacheTtlObservation[]>();
       const allTtlObs: CacheTtlObservation[] = [];
       const convTtlMap = new Map<string, ReturnType<typeof analyzeStepCacheTtl>["summary"]>();
-      const toolAgg = new Map<string, ToolUsageBreakdown>();
 
       let subagentCount = 0, callCount = 0, inputTokens = 0, cacheReadTokens = 0, outputTokens = 0;
       let thinkingTokens = 0, responseTokens = 0, latencySum = 0, estimatedCostUsd = 0, cacheSavedUsd = 0;
@@ -452,35 +438,33 @@ export function createTelemetryService(
           }
 
           const mk = s.modelName || "Unknown Model";
-          for (const [map, key, label] of [[dayMap, bk.dayKey, bk.dayLabel], [hourMap, bk.hourKey, bk.hourLabel]] as const) {
-            const b = map.get(key) ?? {
-              bucketKey: key, label, callCount: 0, inputTokens: 0, cacheReadTokens: 0,
-              outputTokens: 0, thinkingTokens: 0, totalTokens: 0, estimatedCostUsd: 0, models: [],
+          const b = dayMap.get(bk.dayKey) ?? {
+            bucketKey: bk.dayKey, label: bk.dayLabel, callCount: 0, inputTokens: 0, cacheReadTokens: 0,
+            outputTokens: 0, thinkingTokens: 0, totalTokens: 0, estimatedCostUsd: 0, models: [],
+          };
+          b.callCount++;
+          b.inputTokens += s.inputTokens;
+          b.cacheReadTokens += s.cacheReadTokens;
+          b.outputTokens += s.outputTokens;
+          b.thinkingTokens += s.thinkingTokens;
+          b.totalTokens += s.totalTokens;
+          b.estimatedCostUsd += s.estimatedCostUsd;
+          const bmList = b.models ?? (b.models = []);
+          let bm = bmList.find((m) => m.modelName === mk);
+          if (!bm) {
+            bm = {
+              modelName: mk, modelId: s.modelId || mk, callCount: 0,
+              inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0,
             };
-            b.callCount++;
-            b.inputTokens += s.inputTokens;
-            b.cacheReadTokens += s.cacheReadTokens;
-            b.outputTokens += s.outputTokens;
-            b.thinkingTokens += s.thinkingTokens;
-            b.totalTokens += s.totalTokens;
-            b.estimatedCostUsd += s.estimatedCostUsd;
-            const bmList = b.models ?? (b.models = []);
-            let bm = bmList.find((m) => m.modelName === mk);
-            if (!bm) {
-              bm = {
-                modelName: mk, modelId: s.modelId || mk, callCount: 0,
-                inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0,
-              };
-              bmList.push(bm);
-            }
-            bm.callCount++;
-            bm.inputTokens += s.inputTokens;
-            bm.cacheReadTokens += s.cacheReadTokens;
-            bm.outputTokens += s.outputTokens;
-            bm.totalTokens += s.totalTokens;
-            bm.estimatedCostUsd += s.estimatedCostUsd;
-            map.set(key, b);
+            bmList.push(bm);
           }
+          bm.callCount++;
+          bm.inputTokens += s.inputTokens;
+          bm.cacheReadTokens += s.cacheReadTokens;
+          bm.outputTokens += s.outputTokens;
+          bm.totalTokens += s.totalTokens;
+          bm.estimatedCostUsd += s.estimatedCostUsd;
+          dayMap.set(bk.dayKey, b);
           const mItem = modelAgg.get(mk) ?? {
             modelName: mk, modelId: s.modelId || mk, conversationCount: 0, callCount: 0,
             inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, thinkingTokens: 0, responseTokens: 0,
@@ -516,13 +500,6 @@ export function createTelemetryService(
           mItem.estimatedCostUsd += s.estimatedCostUsd;
           mItem.cacheSavedUsd += s.cacheSavedUsd;
           modelAgg.set(mk, mItem);
-
-          for (const tName of s.toolNames) {
-            const tItem = toolAgg.get(tName) ?? { toolName: tName, invocationCount: 0, associatedOutputTokens: 0 };
-            tItem.invocationCount++;
-            tItem.associatedOutputTokens += s.outputTokens;
-            toolAgg.set(tName, tItem);
-          }
         }
       }
 
@@ -697,14 +674,11 @@ export function createTelemetryService(
               .sort((a, m2) => m2.estimatedCostUsd - a.estimatedCostUsd || m2.totalTokens - a.totalTokens),
           }))
           .sort((a, b) => a.bucketKey.localeCompare(b.bucketKey)),
-        hourlyTrend: [...hourMap.values()].sort((a, b) => a.bucketKey.localeCompare(b.bucketKey)).slice(-24),
         byModel,
         byWorkspace,
-        topTools: [...toolAgg.values()].sort((a, b) => b.invocationCount - a.invocationCount).slice(0, 15),
         conversations,
         availableWorkspaces: [...wsSet].sort(),
         availableModels: [...modelSet].sort(),
-        defaultPricing: pricing,
         cacheTtl: aggregateCacheTtlObservations(allTtlObs, true),
         ...(Object.keys(liveQuota).length > 0 ? { liveQuota } : {}),
       };
