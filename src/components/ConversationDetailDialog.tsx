@@ -420,12 +420,13 @@ export interface ConversationDetailDialogProps {
   open: boolean; // 受控打开状态
   onOpenChange: (open: boolean) => void; // 模态框状态变更回调
   customRates: ModelPriceRate[] | null; // 当前生效的自定义单价配置
+  sourceId?: string; // 可选数据源 ID（多账号场景下透传至详情接口）
 }
 
 /**
  * 职责：打开时按需请求 GET /api/conversations/:id 并渲染会话元数据与单步推理明细表。
  * 思路：监听 open 与 conversationId 拉取详情，使用 flex 列自适应布局与 min-w-0 双向滚动容器渲染单步 Table，展示双源标记、上下文水位与工具触发链。
- * 参数：props — 受控弹窗开关、conversationId 及自定义费率。
+ * 参数：props — 受控弹窗开关、conversationId、sourceId 及自定义费率。
  * 返回值：无障碍 Radix Dialog 模态框节点。
  */
 export function ConversationDetailDialog({
@@ -433,6 +434,7 @@ export function ConversationDetailDialog({
   open,
   onOpenChange,
   customRates,
+  sourceId = "",
 }: ConversationDetailDialogProps) {
   // 0. 管理异步请求状态、错误消息与重试计数器
   const [rawDetail, setRawDetail] = useState<ConversationDetail | null>(null); // 服务端返回的原始详情
@@ -447,7 +449,9 @@ export function ConversationDetailDialog({
     setLoading(true);
     setErrorMsg(null);
 
-    fetch(`/api/conversations/${encodeURIComponent(conversationId)}`)
+    const sourceQuery =
+      sourceId && sourceId !== "all" ? `?source=${encodeURIComponent(sourceId)}` : "";
+    fetch(`/api/conversations/${encodeURIComponent(conversationId)}${sourceQuery}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as Record<string, unknown>;
@@ -469,7 +473,7 @@ export function ConversationDetailDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, conversationId, reloadTick]);
+  }, [open, conversationId, sourceId, reloadTick]);
 
   // 1.2. 应用客户端自定义单价重算单步与汇总成本
   const detail = useMemo(
@@ -501,6 +505,14 @@ export function ConversationDetailDialog({
             <DialogTitle className="truncate text-sm font-semibold sm:text-base">
               {detail?.title || "会话明细"}
             </DialogTitle>
+            {detail?.sourceLabel && (
+              <Badge
+                variant="outline"
+                className="h-4 border-indigo-400/40 bg-indigo-500/8 px-1.5 text-[10px] text-indigo-700 dark:text-indigo-300"
+              >
+                {detail.sourceLabel}
+              </Badge>
+            )}
             {detail && (detail.nestingDepth > 0 || Boolean(detail.parentConversationId)) && (
               <Badge className="h-4 bg-violet-600 px-1.5 text-[10px] text-white dark:bg-violet-500">
                 <Bot className="size-3" />

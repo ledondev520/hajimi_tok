@@ -195,6 +195,7 @@ export interface TelemetryServiceOptions {
   calibrationsPath?: string; // 可选自定义 calibrations.json 路径
   liveQuotaPath?: string; // 可选自定义 live-quota.json 路径
   useEnvAnchors?: boolean; // 是否读取环境变量锚点（默认非隔离态启用）
+  scanner?: ReturnType<typeof createTelemetryScanner>; // 可选外部注入扫描器（供多源聚合复用缓存避免重复扫盘）
 }
 
 /**
@@ -221,7 +222,7 @@ export function createTelemetryService(
   const isolated = Boolean(serviceOpts.isolated);
   const useEnvAnchors = serviceOpts.useEnvAnchors ?? !isolated;
   const pricing = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效费率配置
-  const scanner = createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
+  const scanner = serviceOpts.scanner ?? createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
   const resetStore =
     !isolated || serviceOpts.resetsPath ? createResetStore(serviceOpts.resetsPath) : null;
   const calibrationStore =

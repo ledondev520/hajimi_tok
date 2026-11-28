@@ -28,6 +28,7 @@ import {
 } from "@/components/ConversationExplorer";
 import { ConversationDetailDialog } from "@/components/ConversationDetailDialog";
 import { ResetCalendarPage } from "@/components/ResetCalendarPage";
+import { SourceSwitcherBar } from "@/components/SourceSwitcherBar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -194,12 +195,15 @@ export function App() {
   const initViewPrefs = useMemo(
     () =>
       readStoredJson<{
+        selectedSource?: string;
         selectedModel?: string;
         selectedWorkspace?: string;
         chartWindow?: NodeWindowKey;
       }>("agy_dashboard_view_prefs_v1", {}),
     []
   );
+  const [selectedSource, setSelectedSource] = useState<string>(initViewPrefs.selectedSource ?? "all");
+  const [appliedSource, setAppliedSource] = useState<string>(initViewPrefs.selectedSource ?? "all");
   const [cycle, setCycle] = useState<QuotaCycleMode>(resolveInitialCycle);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
   const [appliedWorkspace, setAppliedWorkspace] = useState<string>(initViewPrefs.selectedWorkspace ?? "");
@@ -243,11 +247,12 @@ export function App() {
 
   useEffect(() => {
     writeStoredJson("agy_dashboard_view_prefs_v1", {
+      selectedSource,
       selectedModel,
       selectedWorkspace,
       chartWindow,
     });
-  }, [selectedModel, selectedWorkspace, chartWindow]);
+  }, [selectedSource, selectedModel, selectedWorkspace, chartWindow]);
 
   /**
    * 职责：向本地只读服务请求会话 Token 汇总数据。
@@ -256,12 +261,13 @@ export function App() {
   const fetchSummary = useCallback(
     async (forceRefresh = false) => {
       // 1.1. 命中前端缓存时先瞬显旧快照，同时取消过期请求并在后台静默拉新
-      const cacheKey = `${cycle}|${selectedWorkspace}|${selectedModel}`;
+      const cacheKey = `${selectedSource}|${cycle}|${selectedWorkspace}|${selectedModel}`;
       if (!forceRefresh) {
         const cached = summaryCacheRef.current.get(cacheKey);
         if (cached) {
           startTransition(() => {
             setSummary(cached);
+            setAppliedSource(cached.activeSource ?? selectedSource);
             setAppliedModel(selectedModel);
             setAppliedWorkspace(selectedWorkspace);
           });
@@ -275,6 +281,7 @@ export function App() {
 
       try {
         const params = new URLSearchParams();
+        if (selectedSource) params.set("source", selectedSource);
         params.set("cycle", cycle);
         if (selectedWorkspace) params.set("workspace", selectedWorkspace);
         if (selectedModel) params.set("model", selectedModel);
@@ -300,13 +307,18 @@ export function App() {
         }
         const data = (await res.json()) as DashboardSummaryPayload;
         if (reqSeq !== requestSeqRef.current) return;
+        const resolvedSource = data.activeSource ?? selectedSource;
         summaryCacheRef.current.set(cacheKey, data);
-        if (summaryCacheRef.current.size > 16) {
+        if (summaryCacheRef.current.size > 24) {
           const oldest = summaryCacheRef.current.keys().next().value;
           if (oldest !== undefined) summaryCacheRef.current.delete(oldest);
         }
         startTransition(() => {
           setSummary(data);
+          setAppliedSource(resolvedSource);
+          if (data.activeSource && data.activeSource !== selectedSource) {
+            setSelectedSource(data.activeSource);
+          }
           setAppliedModel(selectedModel);
           setAppliedWorkspace(selectedWorkspace);
         });
@@ -321,7 +333,7 @@ export function App() {
         }
       }
     },
-    [cycle, selectedWorkspace, selectedModel]
+    [selectedSource, cycle, selectedWorkspace, selectedModel]
   );
 
   // 1.2. 筛选条件变化时立即拉取；仅在前台可见时 5 秒轮询，切回标签页瞬时刷新避免后台空转
@@ -355,17 +367,18 @@ export function App() {
   useEffect(() => {
     if (!hasSummary) return;
     const targets = ["", "pool:claude", "pool:gemini"].filter(
-      (m) => m !== selectedModel && !summaryCacheRef.current.has(`${cycle}|${selectedWorkspace}|${m}`)
+      (m) => m !== selectedModel && !summaryCacheRef.current.has(`${selectedSource}|${cycle}|${selectedWorkspace}|${m}`)
     );
     if (targets.length === 0) return;
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       for (const m of targets) {
         if (cancelled || document.visibilityState !== "visible") return;
-        const key = `${cycle}|${selectedWorkspace}|${m}`;
+        const key = `${selectedSource}|${cycle}|${selectedWorkspace}|${m}`;
         if (summaryCacheRef.current.has(key)) continue;
         try {
           const params = new URLSearchParams({ cycle });
+          if (selectedSource) params.set("source", selectedSource);
           if (selectedWorkspace) params.set("workspace", selectedWorkspace);
           if (m) params.set("model", m);
           const res = await fetch(`/api/summary?${params.toString()}`);
@@ -381,7 +394,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [hasSummary, cycle, selectedWorkspace, selectedModel]);
+  }, [hasSummary, selectedSource, cycle, selectedWorkspace, selectedModel]);
 
   // 1.3. 根据本机已扫描到的全部模型动态生成顶栏快捷切换按钮（新用 Sonnet 5.5 等会自动长出新按钮）
   const modelShortcuts = useMemo(
@@ -477,7 +490,7 @@ export function App() {
                           >
                             <span>{item.label}</span>
                             {item.hotkey && (
-                              <kbd className="rounded bg-slate-200/70 px-1 font-mono text-[10px] leading-4 text-slate-500 dark:bg-slate-700/70 dark:text-slate-400">
+                              <kbd className="hidden rounded bg-slate-200/70 px-1 font-mono text-[10px] leading-4 text-slate-500 sm:inline dark:bg-slate-700/70 dark:text-slate-400">
                                 {item.hotkey}
                               </kbd>
                             )}
@@ -559,6 +572,7 @@ export function App() {
               })()}
 
               {summary?.quotaWindow &&
+                !(summary.sources && summary.sources.length > 1 && appliedSource === "all") &&
                 summary.quotaWindow.mode !== "all" &&
                 (summary.quotaWindow.isIdleReset || summary.quotaWindow.resetsInMs > 0) && (
                   <Tooltip>
@@ -595,7 +609,11 @@ export function App() {
                     className="h-7 w-7 p-0 text-slate-700 dark:text-slate-200"
                   >
                     <a
-                      href="/calendar"
+                      href={
+                        selectedSource && selectedSource !== "all"
+                          ? `/calendar?source=${encodeURIComponent(selectedSource)}`
+                          : "/calendar"
+                      }
                       target="_blank"
                       rel="noopener noreferrer"
                       aria-label="打开重置日历与登记页"
@@ -653,7 +671,19 @@ export function App() {
             </div>
           ) : summary ? (
             <>
+              {summary.sources && summary.sources.length > 1 && (
+                <SourceSwitcherBar
+                  sources={summary.sources}
+                  activeSource={selectedSource}
+                  onSelectSource={(nextSource) => {
+                    setSelectedSource(nextSource);
+                    setSelectedWorkspace("");
+                  }}
+                />
+              )}
               <KpiCards
+                key={appliedSource || "all"}
+                activeSource={appliedSource}
                 totals={summary.totals}
                 byModel={summary.byModel}
                 mainConversationCount={mainConvCount}
@@ -670,6 +700,8 @@ export function App() {
                 isWorkspaceFiltered={
                   Boolean(selectedWorkspace || appliedWorkspace) ||
                   selectedModel !== appliedModel ||
+                  selectedSource !== appliedSource ||
+                  Boolean(summary.sources && summary.sources.length > 1 && appliedSource === "all") ||
                   Boolean(summary.quotaWindow && summary.quotaWindow.mode !== cycle)
                 }
               />
@@ -724,6 +756,7 @@ export function App() {
         {/* 点击会话“详情”弹出的单步 Token 拆解对话框 */}
         <ConversationDetailDialog
           conversationId={activeConvId}
+          sourceId={appliedSource}
           open={activeConvId !== null}
           onOpenChange={(open) => {
             if (!open) setActiveConvId(null);

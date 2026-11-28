@@ -235,12 +235,16 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
   const rawSearch = url.searchParams.get("search")?.trim();
   const search = rawSearch ? rawSearch : undefined;
 
+  const rawSource = url.searchParams.get("source")?.trim();
+  const source = rawSource ? rawSource : undefined;
+
   // 1.2. 解析归档会话开关（默认 true）与强制刷新标志
   const includeArchived = url.searchParams.get("includeArchived") !== "false";
   const rawRefresh = url.searchParams.get("refresh");
   const forceRefresh = rawRefresh === "1" || rawRefresh === "true";
 
   return {
+    ...(source ? { source } : {}),
     ...(cycle ? { cycle } : {}),
     days,
     workspace,
@@ -448,10 +452,11 @@ export function createTelemetryHttpServer(
 
       const replyJson = (statusCode: number, payload: unknown, extraHeaders?: Record<string, string>) =>
         sendJson(res, statusCode, payload, extraHeaders, trustedOrigin);
+      const sourceParam = url.searchParams.get("source")?.trim() || undefined;
 
       // 1.1.1. 配额重置记录读写接口（GET / POST / DELETE /api/resets）
       if (pathname === "/api/resets" && req.method === "GET") {
-        replyJson(200, { resets: provider.getResets ? provider.getResets() : [] });
+        replyJson(200, { resets: provider.getResets ? provider.getResets(sourceParam) : [] });
         return;
       }
       if (pathname === "/api/resets" && req.method === "POST") {
@@ -468,7 +473,7 @@ export function createTelemetryHttpServer(
             return;
           }
           const note = typeof body.note === "string" ? body.note : "";
-          const resets = provider.addReset({ timestamp, pool: rawPool, note });
+          const resets = provider.addReset({ timestamp, pool: rawPool, note }, sourceParam);
           replyJson(201, { resets });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "参数不合法" });
@@ -486,7 +491,7 @@ export function createTelemetryHttpServer(
           return;
         }
         try {
-          const resets = provider.deleteReset(decodeURIComponent(rawId));
+          const resets = provider.deleteReset(decodeURIComponent(rawId), sourceParam);
           replyJson(200, { resets });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "删除重置记录失败" });
@@ -497,7 +502,7 @@ export function createTelemetryHttpServer(
       // 1.1.2. 周配额剩余%校准读写接口（GET / POST / DELETE /api/calibrations）
       if (pathname === "/api/calibrations" && req.method === "GET") {
         if (provider.getCalibrationsState) {
-          const state = provider.getCalibrationsState();
+          const state = provider.getCalibrationsState(sourceParam);
           if (!state.ok) {
             replyJson(500, { error: state.error, corrupted: true });
             return;
@@ -506,8 +511,8 @@ export function createTelemetryHttpServer(
           return;
         }
         replyJson(200, {
-          calibrations: provider.getCalibrations ? provider.getCalibrations() : {},
-          initialized: provider.isCalibrationsInitialized ? provider.isCalibrationsInitialized() : false,
+          calibrations: provider.getCalibrations ? provider.getCalibrations(sourceParam) : {},
+          initialized: provider.isCalibrationsInitialized ? provider.isCalibrationsInitialized(sourceParam) : false,
         });
         return;
       }
@@ -531,7 +536,8 @@ export function createTelemetryHttpServer(
               body.batch as Record<
                 string,
                 { remainingPct: number; calibratedCostUsd: number; calibratedTokens: number; calibratedAt: string }
-              >
+              >,
+              sourceParam
             );
             if (res.conflict) {
               replyJson(409, { calibrations: res.calibrations, initialized: true, alreadyInitialized: true });
@@ -563,7 +569,8 @@ export function createTelemetryHttpServer(
               calibratedTokens: body.calibratedTokens as number,
               calibratedAt,
             },
-            { source }
+            { source },
+            sourceParam
           );
           replyJson(200, { calibrations, initialized: true });
         } catch (err) {
@@ -579,7 +586,7 @@ export function createTelemetryHttpServer(
         try {
           const key = url.searchParams.get("key")?.trim() ?? "";
           const atParam = url.searchParams.get("at")?.trim();
-          const calibrations = provider.deleteCalibration(key, atParam || undefined);
+          const calibrations = provider.deleteCalibration(key, atParam || undefined, sourceParam);
           replyJson(200, { calibrations });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "删除周校准失败" });
@@ -644,9 +651,14 @@ export function createTelemetryHttpServer(
         return;
       }
 
-      // 1.2. 健康检查与汇总查询路由
+      // 1.2. 健康检查、数据源列表与汇总查询路由
       if (pathname === "/api/health") {
-        replyJson(200, provider.getHealth());
+        replyJson(200, provider.getHealth(sourceParam));
+        return;
+      }
+
+      if (pathname === "/api/sources") {
+        replyJson(200, { sources: provider.getSources ? provider.getSources() : [] });
         return;
       }
 
@@ -660,7 +672,7 @@ export function createTelemetryHttpServer(
         return;
       }
 
-      // 1.3. 单会话详情路由（支持 URL 编码 ID）
+      // 1.3. 单会话详情路由（支持 URL 编码 ID 与可选 source 过滤）
       if (pathname.startsWith("/api/conversations/")) {
         const rawId = pathname.slice("/api/conversations/".length);
         if (!rawId || rawId.includes("/")) {
@@ -668,7 +680,7 @@ export function createTelemetryHttpServer(
           return;
         }
         const conversationId = decodeURIComponent(rawId);
-        const detail = provider.getConversationDetail(conversationId);
+        const detail = provider.getConversationDetail(conversationId, sourceParam);
         if (!detail) {
           replyJson(404, { error: "Conversation not found" });
           return;

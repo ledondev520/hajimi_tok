@@ -1,10 +1,10 @@
 /**
- * Input: process.argv 命令行参数、./aggregator 与 ./cliRender。
- * Output: 向终端标准输出打印 AntiGravity 会话 Token 消耗统计表或 JSON 结果。
+ * Input: process.argv 命令行参数、./multiSource 与 ./cliRender。
+ * Output: 向终端标准输出打印 AntiGravity 会话 Token 消耗统计表或 JSON 结果（支持原生与 T3 Code 多账号聚合）。
  * Pos: 终端一键命令行统计入口（npm run stats）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { createTelemetryService } from "./aggregator";
+import { createMultiSourceTelemetryService } from "./multiSource";
 import { parseCliArgs, renderCliHelp, renderCliReport } from "./cliRender";
 
 /**
@@ -19,9 +19,10 @@ function runCli(argv: string[]): void {
     return;
   }
 
-  // 1.1. 创建遥测聚合服务并查询结果
-  const service = createTelemetryService(args.dataDir);
+  // 1.1. 创建多数据源遥测聚合服务并查询结果
+  const service = createMultiSourceTelemetryService(args.dataDir);
   const summary = service.getSummary({
+    source: args.source,
     days: args.days,
     workspace: args.workspace,
     model: args.model,
