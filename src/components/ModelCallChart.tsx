@@ -4,7 +4,7 @@
  * Pos: 看板中部紧凑趋势可视化层，将每次增量读取的模型推理调用渲染为可交互 Token 或 TPS 折线节点（src/components/ModelCallChart.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Gauge, Percent, TrendingUp } from "lucide-react";
 import type { CallNodePoint, ModelUsageBreakdown } from "@/types/telemetry";
 import {
@@ -119,7 +119,7 @@ export function resolveModelStyle(modelName: string, fallbackIndex: number): Mod
  * 参数：props — 调用节点序列、总调用次数与点击会话回调。
  * 返回值：shadcn Card 包裹的可交互折线图组件。
  */
-export const ModelCallChart = memo(function ModelCallChart({
+export function ModelCallChart({
   nodes,
   byModel,
   totalCallCount,
@@ -781,4 +781,4 @@ export const ModelCallChart = memo(function ModelCallChart({
       </CardContent>
     </Card>
   );
-});
+}

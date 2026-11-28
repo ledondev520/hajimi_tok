@@ -174,6 +174,7 @@ function withFileLock(targetPath, fn) {
 /** 检测本机是否安装了官方 agy CLI 或存在其配置目录 */
 function hasAgyCli(agyDir = AGY_CLI_DIR) {
   if (fs.existsSync(agyDir)) return true;
+  if (fs.existsSync(path.join(os.homedir(), ".local", "bin", "agy"))) return true;
   try {
     execFileSync(process.platform === "win32" ? "where" : "which", ["agy"], {
       stdio: "ignore",
@@ -243,7 +244,12 @@ export function extractWeeklyQuotaPools(payload) {
 
     let poolKey = "";
     if (lower.includes("gemini")) poolKey = "pool:gemini";
-    else if (lower.includes("claude") || lower.includes("anthropic") || lower.includes("gpt")) {
+    else if (
+      /(^|[-_])3p([-_]|$)/.test(lower) ||
+      lower.includes("claude") ||
+      lower.includes("anthropic") ||
+      lower.includes("gpt")
+    ) {
       poolKey = "pool:claude";
     }
     if (!poolKey) continue;

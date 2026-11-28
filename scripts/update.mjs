@@ -1,34 +1,43 @@
 /**
- * Input: node:child_process、node:crypto、node:fs、node:os、node:path、node:url 与本地 Git / npm / launchctl 命令。
- * Output: 一键安全检查与自更新脚本（npm run update / --check / --no-restart / --confirm-applied），带唯一归属锁、跨提交断点恢复与重启生效确认。
+ * Input: node:crypto、node:fs、node:os、node:path、node:url 与 ./update-runtime.mjs 运行时原语。
+ * Output: 导出 acquireUpdateLock / checkForUpdate / confirmAppliedUpdate / performUpdate 与自更新 CLI（--check / --no-restart / --confirm-applied / --json / --no-notify），集唯一归属锁、断点续建、ls-remote 快路径、lockfile 漂移自愈、dist 备份恢复、服务归属校验与重启 PID+探活核验于一体。
  * Pos: 哈吉米统计自动更新编排脚本，供命令行、后台静默循环与服务端 /api/update 路由共用（scripts/update.mjs）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  backupDist,
+  buildRunEnv,
+  detectInProgressGitOp,
+  formatExecError,
+  getLaunchdServiceInfo,
+  gitExec,
+  inspectPlistOwnership,
+  inspectTrackedWorktree,
+  isAncestor,
+  queryRemoteHeadSha,
+  resolveUpstreamTarget,
+  restoreDistBackup,
+  restoreLockfileDriftIfOnlyDirty,
+  runText,
+  sendNotification,
+  shortSha,
+  trimDaemonLogs,
+  verifyRestartedService,
+} from "./update-runtime.mjs";
 
-const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // 默认仓库根目录
-const LAUNCHD_LABEL = "com.hamiji.sta"; // macOS LaunchAgent 标识
+const DEFAULT_ROOT = path.resolve(process.env.HAJIMI_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")); // 默认仓库根目录
+const LAUNCHD_LABEL = process.env.HAJIMI_SERVICE_LABEL || "com.hamiji.sta"; // macOS LaunchAgent 标识
 const CORRUPT_LOCK_STALE_MS = 10 * 60_000; // 仅当锁文件内容损坏无有效 PID 时，超过 10 分钟视为陈旧锁
 const REAP_STALE_MS = 30_000; // 清理僵尸锁二级互斥锁超期阈值
 
 /** 解析更新锁与断点状态落盘目录 */
 function resolveStateDir(customStateDir) {
   return customStateDir || process.env.AGY_STATE_DIR?.trim() || path.join(os.homedir(), ".hamiji-sta");
-}
-
-/** 在指定仓库目录同步执行子命令并返回标准输出文本 */
-function runText(cmd, args, timeoutMs = 15_000, cwd = DEFAULT_ROOT) {
-  return execFileSync(cmd, args, {
-    cwd,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
 }
 
 /** 判断指定 PID 进程是否仍存活（存活持有人绝不因锁龄被抢占） */
@@ -72,9 +81,7 @@ function readLockMeta(lockPath) {
 /** 判定现有锁是否可安全回收：存活 PID 永不回收；仅死进程或超龄损坏锁可回收 */
 function isLockReapable(lockPath, meta) {
   if (!meta) return false;
-  if (!meta.corrupt && meta.pid > 0) {
-    return !isPidAlive(meta.pid);
-  }
+  if (!meta.corrupt && meta.pid > 0) return !isPidAlive(meta.pid);
   const ident = getFileIdentity(lockPath);
   return Boolean(ident && Date.now() - ident.mtimeMs > CORRUPT_LOCK_STALE_MS);
 }
@@ -83,17 +90,11 @@ function isLockReapable(lockPath, meta) {
 function releaseTokenFile(filePath, expectedToken) {
   const cur = readLockMeta(filePath);
   if (cur && cur.token === expectedToken) {
-    try {
-      fs.unlinkSync(filePath);
-    } catch {
-      /* ignore */
-    }
+    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
   }
 }
 
-/**
- * 职责：使用带唯一归属令牌的 .reap 二级原子锁清理死亡或超龄损坏主锁，二次核验文件身份与可回收条件。
- */
+/** 使用带唯一归属令牌的 .reap 二级原子锁清理死亡或超龄损坏主锁，二次核验文件身份与可回收条件。 */
 function tryReapStaleLock(lockPath, expectedFileId) {
   const reapPath = `${lockPath}.reap`;
   const reapToken = `reap:${process.pid}:${Date.now()}:${crypto.randomBytes(4).toString("hex")}`;
@@ -114,12 +115,7 @@ function tryReapStaleLock(lockPath, expectedFileId) {
           (rm && !rm.corrupt && rm.pid > 0 && !isPidAlive(rm.pid)) ||
           Boolean(rm && rm.corrupt && rIdent && Date.now() - rIdent.mtimeMs > REAP_STALE_MS);
         if (reapDead && rIdent && getFileIdentity(reapPath)?.id === rIdent.id) {
-          try {
-            fs.unlinkSync(reapPath);
-            continue;
-          } catch {
-            return false;
-          }
+          try { fs.unlinkSync(reapPath); continue; } catch { return false; }
         }
       }
       return false;
@@ -132,20 +128,13 @@ function tryReapStaleLock(lockPath, expectedFileId) {
     if (!afterIdent || afterIdent.id !== expectedFileId) return false;
     const cur = readLockMeta(lockPath);
     if (!cur || !isLockReapable(lockPath, cur)) return false;
-    try {
-      fs.unlinkSync(lockPath);
-      return true;
-    } catch {
-      return false;
-    }
+    try { fs.unlinkSync(lockPath); return true; } catch { return false; }
   } finally {
     releaseTokenFile(reapPath, reapToken);
   }
 }
 
-/**
- * 职责：获取带唯一归属令牌的跨进程更新互斥锁（释放时严格核对 token）。
- */
+/** 获取带唯一归属令牌的跨进程更新互斥锁（释放时严格核对 token）。 */
 export function acquireUpdateLock(lockPath) {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const myToken = `${process.pid}:${Date.now()}:${crypto.randomBytes(4).toString("hex")}`;
@@ -169,7 +158,6 @@ export function acquireUpdateLock(lockPath) {
   return null;
 }
 
-/** 读取上次更新断点状态 */
 function readUpdateState(statePath) {
   if (!fs.existsSync(statePath)) return {};
   try {
@@ -180,7 +168,6 @@ function readUpdateState(statePath) {
   }
 }
 
-/** 原子落盘更新断点状态 */
 function writeUpdateState(statePath, state) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   const tmp = `${statePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
@@ -195,7 +182,7 @@ function isPreMergeIntent(state, headFull) {
     state.fromCommit === headFull &&
       state.targetCommit &&
       state.targetCommit !== headFull &&
-      state.appliedCommit !== state.targetCommit
+      state.appliedCommit !== state.targetCommit,
   );
 }
 
@@ -205,40 +192,140 @@ function isPostMergePending(state, headFull) {
   return Boolean(
     state.targetCommit === headFull &&
       state.appliedCommit !== headFull &&
-      (state.pendingInstall || state.pendingBuild || state.pendingRestart)
+      (state.pendingInstall || state.pendingBuild || state.pendingRestart || state.pendingReinstallService),
   );
 }
 
-/** 判断指定 HEAD 是否存在未完成的合并前意图或合并后断点 */
 function hasPendingStepsForHead(state, headFull) {
   return isPreMergeIntent(state, headFull) || isPostMergePending(state, headFull);
 }
 
 /**
- * 职责：探测当前仓库与远端上游分支的同步状态（含未完成 install/build/restart 断点识别）。
+ * 职责：探测当前仓库与远端上游分支的同步状态（含未完成断点识别、进行中 Git 操作拦截与 ls-remote 零写入快路径）。
  */
 export function checkForUpdate(options = {}) {
-  const repoRoot = options.repoRoot || DEFAULT_ROOT;
+  const repoRoot = path.resolve(options.repoRoot || DEFAULT_ROOT);
   const statePath = path.join(resolveStateDir(options.stateDir), "update-state.json");
   if (!fs.existsSync(path.join(repoRoot, ".git"))) {
     return { ok: false, available: false, behindCount: 0, dirty: false, reason: "非 Git 仓库目录" };
   }
 
-  let upstream = "";
-  try {
-    upstream = runText("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 5000, repoRoot);
-  } catch {
-    return { ok: false, available: false, behindCount: 0, dirty: false, reason: "未配置上游跟踪分支" };
+  const env = buildRunEnv(repoRoot);
+  const activeOp = detectInProgressGitOp(repoRoot, env);
+  if (activeOp) {
+    return { ok: false, available: false, behindCount: 0, dirty: true, reason: `检测到未完成的 Git 操作 (${activeOp})` };
   }
 
-  const currentCommit = runText("git", ["rev-parse", "--short", "HEAD"], 5000, repoRoot);
-  const currentFullCommit = runText("git", ["rev-parse", "HEAD"], 5000, repoRoot);
-  const dirty = Boolean(runText("git", ["status", "--porcelain"], 5000, repoRoot));
+  const target = resolveUpstreamTarget(repoRoot, env);
+  let fallbackUpstream = "";
+  if (!target) {
+    try {
+      fallbackUpstream = gitExec(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repoRoot, env, 5000);
+    } catch {
+      return { ok: false, available: false, behindCount: 0, dirty: false, reason: "未配置上游跟踪分支" };
+    }
+  }
+
+  const currentFullCommit = gitExec(["rev-parse", "--verify", "HEAD"], repoRoot, env, 5000);
+  const currentCommit = shortSha(currentFullCommit);
+  const wt = inspectTrackedWorktree(repoRoot, env);
+  const dirty = wt.blockingFiles.length > 0;
   const state = readUpdateState(statePath);
   const pendingSteps = hasPendingStepsForHead(state, currentFullCommit);
 
+  // 1. 常规远端优先走 ls-remote 零 fetch 快路径（远端已是本地祖先时免去 git fetch）
+  if (target) {
+    let remoteSha = null;
+    try {
+      remoteSha = queryRemoteHeadSha(target.remote, target.branch, repoRoot, env);
+    } catch (err) {
+      return {
+        ok: false,
+        available: pendingSteps,
+        behindCount: 0,
+        currentCommit,
+        currentFullCommit,
+        dirty,
+        lockfileDriftOnly: wt.lockfileDriftOnly,
+        pendingSteps,
+        reason: `拉取远端失败：${formatExecError(err)}`,
+      };
+    }
+
+    if (!remoteSha) {
+      return {
+        ok: false,
+        available: pendingSteps,
+        behindCount: 0,
+        currentCommit,
+        currentFullCommit,
+        dirty,
+        lockfileDriftOnly: wt.lockfileDriftOnly,
+        pendingSteps,
+        remoteReachable: true,
+        reason: `远端 ${target.remote} 未找到分支 ${target.branch}`,
+      };
+    }
+
+    if (remoteSha === currentFullCommit || isAncestor(remoteSha, currentFullCommit, repoRoot, env)) {
+      const latestCommit = shortSha(remoteSha);
+      const latestSubject = gitExec(["log", "-1", "--format=%s", remoteSha], repoRoot, env, 5000);
+      return {
+        ok: true,
+        available: pendingSteps,
+        behindCount: 0,
+        pendingSteps,
+        currentCommit,
+        currentFullCommit,
+        latestCommit,
+        latestFullCommit: remoteSha,
+        latestSubject,
+        upstream: target.upstream,
+        dirty,
+        lockfileDriftOnly: wt.lockfileDriftOnly,
+      };
+    }
+
+    try {
+      gitExec(["fetch", "--no-tags", target.remote, `+refs/heads/${target.branch}:${target.trackingRef}`], repoRoot, env, 30_000);
+    } catch (err) {
+      return {
+        ok: false,
+        available: pendingSteps,
+        behindCount: 0,
+        currentCommit,
+        currentFullCommit,
+        dirty,
+        lockfileDriftOnly: wt.lockfileDriftOnly,
+        pendingSteps,
+        reason: `拉取远端失败：${formatExecError(err)}`,
+      };
+    }
+
+    const latestFullCommit = gitExec(["rev-parse", "--verify", `${target.trackingRef}^{commit}`], repoRoot, env, 5000);
+    const behindCount = Number(gitExec(["rev-list", `${currentFullCommit}..${latestFullCommit}`, "--count"], repoRoot, env, 5000)) || 0;
+    const latestCommit = shortSha(latestFullCommit);
+    const latestSubject = gitExec(["log", "-1", "--format=%s", latestFullCommit], repoRoot, env, 5000);
+
+    return {
+      ok: true,
+      available: behindCount > 0 || pendingSteps,
+      behindCount,
+      pendingSteps,
+      currentCommit,
+      currentFullCommit,
+      latestCommit,
+      latestFullCommit,
+      latestSubject,
+      upstream: target.upstream,
+      dirty,
+      lockfileDriftOnly: wt.lockfileDriftOnly,
+    };
+  }
+
+  // 2. 回退分支（例如本地 `.` 跟踪配置）：沿用 git fetch --quiet 与 @{u}
   try {
-    runText("git", ["fetch", "--quiet"], 12_000, repoRoot);
+    gitExec(["fetch", "--quiet"], repoRoot, env, 15_000);
   } catch (err) {
     return {
       ok: false,
@@ -247,15 +334,16 @@ export function checkForUpdate(options = {}) {
       currentCommit,
       currentFullCommit,
       dirty,
+      lockfileDriftOnly: wt.lockfileDriftOnly,
       pendingSteps,
-      reason: `拉取远端失败：${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+      reason: `拉取远端失败：${formatExecError(err)}`,
     };
   }
 
-  const behindCount = Number(runText("git", ["rev-list", `HEAD..${upstream}`, "--count"], 5000, repoRoot)) || 0;
-  const latestCommit = runText("git", ["rev-parse", "--short", upstream], 5000, repoRoot);
-  const latestFullCommit = runText("git", ["rev-parse", upstream], 5000, repoRoot);
-  const latestSubject = runText("git", ["log", "-1", "--format=%s", upstream], 5000, repoRoot);
+  const behindCount = Number(gitExec(["rev-list", `HEAD..${fallbackUpstream}`, "--count"], repoRoot, env, 5000)) || 0;
+  const latestFullCommit = gitExec(["rev-parse", fallbackUpstream], repoRoot, env, 5000);
+  const latestCommit = shortSha(latestFullCommit);
+  const latestSubject = gitExec(["log", "-1", "--format=%s", fallbackUpstream], repoRoot, env, 5000);
 
   return {
     ok: true,
@@ -267,30 +355,15 @@ export function checkForUpdate(options = {}) {
     latestCommit,
     latestFullCommit,
     latestSubject,
-    upstream,
+    upstream: fallbackUpstream,
     dirty,
+    lockfileDriftOnly: wt.lockfileDriftOnly,
   };
 }
 
-/** 检测 macOS LaunchAgent 常驻服务是否已注册运行 */
-function isLaunchdServiceLoaded() {
-  if (process.platform !== "darwin" || typeof process.getuid !== "function") return false;
-  try {
-    execFileSync("launchctl", ["print", `gui/${process.getuid()}/${LAUNCHD_LABEL}`], {
-      stdio: "ignore",
-      timeout: 3000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 职责：由新启动的正式生产常驻进程在 update.lock 协调下调用，仅当 install 与 build 均已完成且运行 HEAD 匹配 targetCommit 时确认重启生效。
- */
+/** 由新启动的正式生产常驻进程在 update.lock 协调下调用，仅当 install 与 build 均已完成且运行 HEAD 匹配 targetCommit 时确认重启生效。 */
 export function confirmAppliedUpdate(options = {}) {
-  const repoRoot = options.repoRoot || DEFAULT_ROOT;
+  const repoRoot = path.resolve(options.repoRoot || DEFAULT_ROOT);
   const stateDir = resolveStateDir(options.stateDir);
   const lockPath = path.join(stateDir, "update.lock");
   const statePath = path.join(stateDir, "update-state.json");
@@ -304,7 +377,8 @@ export function confirmAppliedUpdate(options = {}) {
     if (!state.pendingRestart || state.pendingInstall || state.pendingBuild) {
       return { confirmed: false };
     }
-    const headFull = runText("git", ["rev-parse", "HEAD"], 5000, repoRoot);
+    const env = buildRunEnv(repoRoot);
+    const headFull = gitExec(["rev-parse", "HEAD"], repoRoot, env, 5000);
     if (!headFull || state.targetCommit !== headFull) {
       return { confirmed: false };
     }
@@ -315,6 +389,7 @@ export function confirmAppliedUpdate(options = {}) {
       pendingInstall: false,
       pendingBuild: false,
       pendingRestart: false,
+      pendingReinstallService: false,
     });
     return { confirmed: true, commit: headFull };
   } catch {
@@ -325,13 +400,13 @@ export function confirmAppliedUpdate(options = {}) {
 }
 
 /**
- * 职责：在跨进程锁保护下执行安全一键更新：
- * 1) 拉取或断点续建均校验工作区干净；
- * 2) 合并前同时落盘 fromCommit 与 targetCommit 保留跨目标待建意图；
- * 3) 需要重启且由调用方或 launchd 接手时保留 pendingRestart=true，待新版本正式服务监听后确认生效。
+ * 职责：在跨进程锁保护下执行安全自更新（同步契约）：
+ * 1) 忽略未跟踪文件并自动还原未暂存 package-lock.json 漂移，合入前复核分支/HEAD/工作区洁净度；
+ * 2) 保留跨提交断点状态机（fromCommit/targetCommit/pending*），构建前备份 dist 并在失败时原子恢复旧产物；
+ * 3) 校验 launchd plist WorkingDirectory 归属与旧版迁移需求，准确输出 serviceAction（install | restart | null）。
  */
 export function performUpdate(options = {}) {
-  const repoRoot = options.repoRoot || DEFAULT_ROOT;
+  const repoRoot = path.resolve(options.repoRoot || DEFAULT_ROOT);
   const serviceScript = path.join(repoRoot, "scripts", "service.mjs");
   const stateDir = resolveStateDir(options.stateDir);
   const lockPath = path.join(stateDir, "update.lock");
@@ -350,6 +425,11 @@ export function performUpdate(options = {}) {
   };
 
   try {
+    trimDaemonLogs(repoRoot);
+    const env = buildRunEnv(repoRoot);
+    let initialBranch = "";
+    try { initialBranch = gitExec(["symbolic-ref", "--quiet", "--short", "HEAD"], repoRoot, env, 5000); } catch { /* detached */ }
+
     const status = checkForUpdate({ repoRoot, stateDir });
     const prevState = readUpdateState(statePath);
     const hasPending = Boolean(status.pendingSteps);
@@ -372,28 +452,54 @@ export function performUpdate(options = {}) {
     let needInstall = Boolean(hasPending && prevState.pendingInstall);
     let needBuild = Boolean(hasPending && prevState.pendingBuild);
     let needRestart = Boolean(hasPending && prevState.pendingRestart);
+    let needReinstallService = Boolean(hasPending && prevState.pendingReinstallService);
     let pulled = false;
-    const headBefore = status.currentFullCommit || runText("git", ["rev-parse", "HEAD"], 5000, repoRoot);
+    const headBefore = status.currentFullCommit || gitExec(["rev-parse", "HEAD"], repoRoot, env, 5000);
     const isPreMergePending = isPreMergeIntent(prevState, headBefore);
+
+    /** 合入前复核分支、HEAD 与工作区洁净度（关闭 fetch 窗口竞态）并按需还原未暂存 lockfile 漂移 */
+    const prepareCleanMerge = () => {
+      let branchNow = "";
+      try { branchNow = gitExec(["symbolic-ref", "--quiet", "--short", "HEAD"], repoRoot, env, 5000); } catch { /* detached */ }
+      if (initialBranch && branchNow !== initialBranch) {
+        return { ok: false, dirty: false, message: `检测到当前分支已切换 (${initialBranch} -> ${branchNow || "detached"})，已跳过更新` };
+      }
+      const headNow = gitExec(["rev-parse", "--verify", "HEAD"], repoRoot, env, 5000);
+      if (headNow !== headBefore) {
+        return { ok: false, dirty: false, message: `检测到本地 HEAD 已变化 (${shortSha(headBefore)} -> ${shortSha(headNow)})，已跳过本次更新` };
+      }
+      const wtNow = inspectTrackedWorktree(repoRoot, env);
+      if (wtNow.blockingFiles.length > 0) {
+        return { ok: false, dirty: true, message: "合入前检测到工作区新增未提交改动，已跳过自动更新" };
+      }
+      if (wtNow.lockfileDriftOnly) {
+        gitExec(["checkout", "--", "package-lock.json"], repoRoot, env, 10_000);
+      }
+      return { ok: true };
+    };
 
     // 1. 区分三种场景：在线有新提交 / 在线确认上游已回退至当前 HEAD / 离线恢复合并前固定目标
     if (status.ok && status.behindCount > 0 && status.latestFullCommit) {
+      const preCheck = prepareCleanMerge();
+      if (!preCheck.ok) {
+        return { ...status, ok: false, updated: false, dirty: preCheck.dirty, message: preCheck.message };
+      }
+
       const fromCommit = headBefore;
       const targetCommit = status.latestFullCommit;
-      const diffRaw = runText("git", ["diff", "--name-only", `HEAD..${targetCommit}`], 5000, repoRoot);
-      const changedFiles = diffRaw ? diffRaw.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+      const diffRaw = gitExec(["diff", "--name-only", `${fromCommit}..${targetCommit}`], repoRoot, env, 5000);
+      const changedFiles = diffRaw ? diffRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
       const diffInstall = changedFiles.some((f) => f === "package.json" || f === "package-lock.json");
       const diffBuild =
         diffInstall ||
-        changedFiles.some(
-          (f) => f.startsWith("src/") || f === "index.html" || f === "vite.config.ts" || f === "tsconfig.json"
-        );
-      const diffRestart =
-        diffBuild || changedFiles.some((f) => f.startsWith("server/") || f.startsWith("scripts/"));
+        changedFiles.some((f) => f.startsWith("src/") || f === "index.html" || f === "vite.config.ts" || f === "tsconfig.json");
+      const diffReinstallService = changedFiles.includes("scripts/service.mjs");
+      const diffRestart = diffBuild || diffReinstallService || changedFiles.some((f) => f.startsWith("server/") || f.startsWith("scripts/"));
 
       const headItselfUnapplied = prevState.appliedCommit !== headBefore;
       needInstall = (headItselfUnapplied && needInstall) || diffInstall;
       needBuild = (headItselfUnapplied && needBuild) || diffBuild;
+      needReinstallService = (headItselfUnapplied && needReinstallService) || diffReinstallService;
       needRestart = (headItselfUnapplied && needRestart) || diffRestart;
 
       writeUpdateState(statePath, {
@@ -403,10 +509,11 @@ export function performUpdate(options = {}) {
         pendingInstall: needInstall,
         pendingBuild: needBuild,
         pendingRestart: needRestart,
+        pendingReinstallService: needReinstallService,
       });
 
       try {
-        runText("git", ["merge", "--ff-only", targetCommit], 20_000, repoRoot);
+        gitExec(["merge", "--ff-only", targetCommit], repoRoot, env, 20_000);
         pulled = true;
       } catch (err) {
         writeUpdateState(statePath, prevState);
@@ -414,7 +521,7 @@ export function performUpdate(options = {}) {
           ...status,
           ok: false,
           updated: false,
-          message: `git merge --ff-only 失败（本地与远端可能分叉）：${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+          message: `git merge --ff-only 失败（本地与远端可能分叉）：${formatExecError(err)}`,
         };
       }
     } else if (status.ok && status.behindCount === 0 && isPreMergePending) {
@@ -427,16 +534,18 @@ export function performUpdate(options = {}) {
           pendingInstall: false,
           pendingBuild: false,
           pendingRestart: false,
+          pendingReinstallService: false,
         });
         return { ...status, ok: true, updated: false, message: "已是最新版本" };
       }
-      // 当前 HEAD 自身尚有待建步骤时，继续仅在当前 HEAD 上完成续建，不再合并旧 C
+    } else if (!status.ok && status.remoteReachable && isPreMergePending) {
+      return { ...status, ok: false, updated: false, message: status.reason || "远端分支缺失，已跳过合并" };
     } else if (!status.ok && isPreMergePending) {
-      // 1.2. 真正离线（fetch 失败）且存在合并前意图：仅当本地已有固定 targetCommit 时续合并，否则保留原意图待重试
+      // 1.2. 真正离线（拉取失败）且存在合并前意图：仅当本地已有固定 targetCommit 时续合并
       const pinnedTarget = prevState.targetCommit;
       let hasPinnedLocally = false;
       try {
-        runText("git", ["cat-file", "-e", `${pinnedTarget}^{commit}`], 3000, repoRoot);
+        gitExec(["cat-file", "-e", `${pinnedTarget}^{commit}`], repoRoot, env, 3000);
         hasPinnedLocally = true;
       } catch {
         hasPinnedLocally = false;
@@ -446,23 +555,27 @@ export function performUpdate(options = {}) {
           ...status,
           ok: false,
           updated: false,
-          message: `远端不可达且目标提交 ${pinnedTarget.slice(0, 7)} 尚未拉取，已保留原更新意图等待重试`,
+          message: `远端不可达且目标提交 ${shortSha(pinnedTarget)} 尚未拉取，已保留原更新意图等待重试`,
         };
       }
+      const preCheck = prepareCleanMerge();
+      if (!preCheck.ok) {
+        return { ...status, ok: false, updated: false, dirty: preCheck.dirty, message: preCheck.message };
+      }
       try {
-        runText("git", ["merge", "--ff-only", pinnedTarget], 20_000, repoRoot);
+        gitExec(["merge", "--ff-only", pinnedTarget], repoRoot, env, 20_000);
         pulled = true;
       } catch (err) {
         return {
           ...status,
           ok: false,
           updated: false,
-          message: `续合并固定目标 ${pinnedTarget.slice(0, 7)} 失败：${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+          message: `续合并固定目标 ${shortSha(pinnedTarget)} 失败：${formatExecError(err)}`,
         };
       }
     }
 
-    const headFull = runText("git", ["rev-parse", "HEAD"], 5000, repoRoot);
+    const headFull = gitExec(["rev-parse", "HEAD"], repoRoot, env, 5000);
     const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
     const curState = {
       appliedCommit: prevState.appliedCommit || headBefore,
@@ -471,23 +584,65 @@ export function performUpdate(options = {}) {
       pendingInstall: needInstall,
       pendingBuild: needBuild,
       pendingRestart: needRestart,
+      pendingReinstallService: needReinstallService,
     };
 
     if (needInstall) {
-      runText(npmBin, ["install", "--no-audit", "--no-fund"], 120_000, repoRoot);
+      runText(npmBin, ["install", "--no-audit", "--no-fund"], 300_000, repoRoot, env);
+      restoreLockfileDriftIfOnlyDirty(repoRoot, env);
       curState.pendingInstall = false;
       writeUpdateState(statePath, curState);
     }
+
     if (needBuild) {
-      runText(npmBin, ["run", "build"], 120_000, repoRoot);
+      const distBak = backupDist(repoRoot, stateDir);
+      let keepBackup = false;
+      try {
+        runText(npmBin, ["run", "build"], 180_000, repoRoot, env);
+      } catch (buildErr) {
+        let restoreErrMsg = "";
+        try {
+          restoreDistBackup(distBak.distDir, distBak.backupDir, distBak.hadDistBefore);
+        } catch (restoreErr) {
+          keepBackup = true;
+          restoreErrMsg = formatExecError(restoreErr);
+        }
+        if (restoreErrMsg) {
+          throw new Error(`恢复 dist 失败: ${restoreErrMsg.slice(0, 120)} | 构建失败: ${formatExecError(buildErr).slice(0, 140)}`);
+        }
+        throw buildErr;
+      } finally {
+        if (!keepBackup && distBak.hadDistBefore && fs.existsSync(distBak.backupDir)) {
+          try { fs.rmSync(distBak.backupDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        }
+      }
       curState.pendingBuild = false;
       writeUpdateState(statePath, curState);
     }
 
-    const serviceLoaded = isLaunchdServiceLoaded();
-    const awaitDaemonConfirm = Boolean(needRestart && (options.noRestart || serviceLoaded));
+    // 2. 判定常驻服务动作：非 113 查询错误直接抛出（保留 pendingRestart 待重试）；归属不明或归属其他副本时跳过服务操作
+    let svcInfo = { loaded: false, pid: null, error: null };
+    let serviceAction = null;
+    let ownsService = false;
+    let shouldInstallService = false;
+    if (needRestart) {
+      svcInfo = getLaunchdServiceInfo(LAUNCHD_LABEL, env);
+      if (svcInfo.error) {
+        throw new Error(`查询常驻服务 ${LAUNCHD_LABEL} 状态失败: ${svcInfo.error}`);
+      }
+      if (svcInfo.loaded) {
+        const plistInfo = inspectPlistOwnership(repoRoot, LAUNCHD_LABEL);
+        if (!plistInfo.exists || plistInfo.ownedBySelf) {
+          ownsService = true;
+          shouldInstallService = needReinstallService || plistInfo.needsMigration;
+          serviceAction = shouldInstallService ? "install" : "restart";
+        }
+      }
+    }
 
-    // 2. 在释放锁并触发重启前先将待重启状态落盘，释放锁后再派发重启脚本，避免新进程启动确认被本进程持锁阻塞为 busy
+    const awaitDaemonConfirm = Boolean(needRestart && (options.noRestart || ownsService));
+
+    // 3. 在释放锁并触发重启前先落盘待重启状态，避免新进程启动确认被本进程持锁阻塞为 busy
     if (awaitDaemonConfirm) {
       writeUpdateState(statePath, {
         appliedCommit: curState.appliedCommit === headFull ? "" : curState.appliedCommit,
@@ -496,6 +651,7 @@ export function performUpdate(options = {}) {
         pendingInstall: false,
         pendingBuild: false,
         pendingRestart: true,
+        pendingReinstallService: shouldInstallService || needReinstallService,
       });
     } else {
       writeUpdateState(statePath, {
@@ -505,87 +661,136 @@ export function performUpdate(options = {}) {
         pendingInstall: false,
         pendingBuild: false,
         pendingRestart: false,
+        pendingReinstallService: false,
       });
     }
 
     releaseOnce();
 
     let restarted = false;
-    if (!options.noRestart && needRestart && serviceLoaded && fs.existsSync(serviceScript)) {
-      runText(process.execPath, [serviceScript, "restart"], 15_000, repoRoot);
+    if (!options.noRestart && serviceAction && fs.existsSync(serviceScript)) {
+      runText(process.execPath, [serviceScript, serviceAction], serviceAction === "install" ? 45_000 : 20_000, repoRoot, env);
       restarted = true;
     }
 
-    const commit = runText("git", ["rev-parse", "--short", "HEAD"], 5000, repoRoot);
-    const subject = runText("git", ["log", "-1", "--format=%s", "HEAD"], 5000, repoRoot);
+    const commit = shortSha(headFull);
+    const subject = gitExec(["log", "-1", "--format=%s", "HEAD"], repoRoot, env, 5000);
     const steps = [];
     if (pulled) steps.push("git ff-only");
     else if (hasPending) steps.push("断点续建");
     if (needInstall) steps.push("npm install");
     if (needBuild) steps.push("npm run build");
-    if (restarted) steps.push("已派发服务重启");
+    if (restarted) steps.push(serviceAction === "install" ? "已重装并重启服务" : "已派发服务重启");
     else if (awaitDaemonConfirm) steps.push("待重启生效");
+
+    const didApplyWork = pulled || needInstall || needBuild || restarted || Boolean(options.noRestart && serviceAction);
+    const message = didApplyWork
+      ? `已更新至 ${commit}（${steps.join(" + ")}）`
+      : `当前代码已是 ${commit}（待常驻服务重启确认生效）`;
 
     return {
       ok: true,
-      updated: true,
+      updated: didApplyWork,
       commit,
       subject,
       behindCount: status.behindCount,
       needInstall,
       needBuild,
       needRestart,
+      needReinstallService: shouldInstallService,
+      serviceAction,
+      prevPid: svcInfo.pid,
       restarted,
       pendingRestart: awaitDaemonConfirm,
-      message: `已更新至 ${commit}（${steps.join(" + ")}）`,
+      message,
     };
   } finally {
     releaseOnce();
   }
 }
 
-// 3. CLI 入口执行
+// 4. CLI 入口执行
 const isDirectRun =
   process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isDirectRun) {
-  const args = new Set(process.argv.slice(2));
-  const asJson = args.has("--json");
-  const isCheckOnly = args.has("--check");
-  const isConfirmApplied = args.has("--confirm-applied");
-  const noRestart = args.has("--no-restart");
+  const argv = process.argv.slice(2);
+  const allowed = new Set(["--json", "--check", "--confirm-applied", "--no-restart", "--no-notify", "--notify", "--help", "-h"]);
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log("用法: node scripts/update.mjs [--check] [--confirm-applied] [--json] [--no-restart] [--no-notify|--notify]");
+    process.exit(0);
+  }
+  const unknown = argv.find((a) => !allowed.has(a));
+  if (unknown) {
+    console.error(`✗ 未知参数: ${unknown}`);
+    process.exit(2);
+  }
 
-  try {
-    const res = isConfirmApplied
+  const asJson = argv.includes("--json");
+  const isCheckOnly = argv.includes("--check");
+  const isConfirmApplied = argv.includes("--confirm-applied");
+  const noRestart = argv.includes("--no-restart");
+  const notifyEnabled = argv.includes("--no-notify")
+    ? false
+    : argv.includes("--notify")
+      ? true
+      : process.env.AGY_UPDATE_NOTIFY !== "0";
+
+  (async () => {
+    const env = buildRunEnv(DEFAULT_ROOT);
+    let res = isConfirmApplied
       ? confirmAppliedUpdate()
       : isCheckOnly
         ? checkForUpdate()
         : performUpdate({ noRestart });
+
+    // CLI 直接重启后核验 launchd 新 PID 切换与 /api/health 就绪
+    if (!isConfirmApplied && !isCheckOnly && res.ok && res.updated && res.restarted && process.platform === "darwin") {
+      const verify = await verifyRestartedService(res.prevPid ?? null, LAUNCHD_LABEL, env);
+      if (!verify.ok) {
+        res = { ...res, ok: false, verified: false, message: `服务重启后健康校验失败: ${verify.reason}` };
+      } else {
+        res = { ...res, verified: true, pid: verify.pid };
+      }
+    }
+
+    const { prevPid: _p, ...output } = res;
+    if (!isConfirmApplied && !isCheckOnly) {
+      if (output.ok && output.updated) {
+        sendNotification(notifyEnabled, "哈吉米统计已自动更新", `${output.commit} (${output.message})`, output.subject || "", env);
+      } else if (!output.ok && !output.busy) {
+        sendNotification(notifyEnabled, "哈吉米统计自动更新异常", "本次更新未完成，请检查日志或工作区", output.message || "", env);
+      }
+    }
+
     if (asJson) {
-      console.log(JSON.stringify(res));
+      console.log(JSON.stringify(output));
     } else if (isConfirmApplied) {
-      console.log(res.confirmed ? `✓ 已确认生效 (${res.commit})` : "· 无需确认");
+      console.log(output.confirmed ? `✓ 已确认生效 (${output.commit})` : "· 无需确认");
     } else if (isCheckOnly) {
       console.log(
-        res.available
-          ? res.pendingSteps && res.behindCount === 0
-            ? `检测到上次更新有未完成构建或重启步骤 (${res.currentCommit})`
-            : `发现 ${res.behindCount} 个新提交 (${res.currentCommit} -> ${res.latestCommit}: ${res.latestSubject})`
-          : res.ok
-            ? `✓ 已是最新版本 (${res.currentCommit})`
-            : `✗ ${res.reason}`
+        output.available
+          ? output.pendingSteps && output.behindCount === 0
+            ? `检测到上次更新有未完成构建或重启步骤 (${output.currentCommit})`
+            : `发现 ${output.behindCount} 个新提交 (${output.currentCommit} -> ${output.latestCommit}: ${output.latestSubject})`
+          : output.ok
+            ? `✓ 已是最新版本 (${output.currentCommit})`
+            : `✗ ${output.reason}`,
       );
     } else {
-      console.log(res.ok ? `✓ ${res.message}` : `✗ ${res.message}`);
+      console.log(output.ok ? `✓ ${output.message}` : `✗ ${output.message}`);
     }
-    if (!isConfirmApplied && !res.ok && !isCheckOnly) process.exit(1);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    if (!isConfirmApplied && !output.ok && !isCheckOnly) process.exit(1);
+  })().catch((err) => {
+    const msg = formatExecError(err);
+    if (!isConfirmApplied && !isCheckOnly) {
+      sendNotification(notifyEnabled, "哈吉米统计自动更新异常", "更新执行异常，请检查日志", msg, buildRunEnv(DEFAULT_ROOT));
+    }
     if (asJson) {
       console.log(JSON.stringify({ ok: false, updated: false, message: msg }));
     } else {
       console.error(`✗ 更新失败: ${msg}`);
     }
     process.exit(1);
-  }
+  });
 }

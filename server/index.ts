@@ -1,15 +1,16 @@
 /**
- * Input: node:path、./multiSource 的 createMultiSourceTelemetryService 与 ./app 的 createTelemetryHttpServer。
- * Output: 启动本地只读 HTTP API 与生产态静态页面常驻托管服务（同时监听 IPv4/IPv6 loopback 4318 与备用 5173，自动兼容 T3 Code 多账号）。
+ * Input: node:os、node:path、./aggregator 的 createTelemetryService 与 ./app 的 createTelemetryHttpServer / resolveUpdateServiceAction。
+ * Output: 启动本地只读 HTTP API 与生产态静态页面常驻托管服务（同时监听 IPv4/IPv6 loopback 4318 与备用 5173，含静默自更新与可选 agy 官方配额定时刷新）。
  * Pos: 服务端主进程启动入口（launchd 常驻服务 / npm start / npm run dev 后端子进程）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import type { Server } from "node:http";
+import os from "node:os";
 import path from "node:path";
-import { createMultiSourceTelemetryService } from "./multiSource";
-import { createTelemetryHttpServer } from "./app";
+import { createTelemetryService } from "./aggregator";
+import { createTelemetryHttpServer, resolveUpdateServiceAction } from "./app";
 
 const PORT = Number(process.env.PORT || 4318); // 主 HTTP 监听端口
 const COMPAT_DEV_PORT = 5173; // 兼容旧浏览器书签的本地端口（空闲时自动挂载）
@@ -18,7 +19,13 @@ const REPO_ROOT = path.resolve(import.meta.dirname, ".."); // 仓库根目录
 const STATIC_DIR = path.resolve(REPO_ROOT, "dist"); // 生产构建前端产物目录
 const UPDATE_SCRIPT = path.join(REPO_ROOT, "scripts", "update.mjs"); // 自更新脚本路径
 const SERVICE_SCRIPT = path.join(REPO_ROOT, "scripts", "service.mjs"); // 常驻重启脚本路径
-const AUTO_UPDATE_INTERVAL_MS = 10 * 60_000; // 后台静默自动检查更新周期（10 分钟）
+const AGY_SETTINGS_PATH = path.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json"); // 官方 agy CLI 配置路径
+const LIVE_QUOTA_SYNC_INTERVAL_MS = 10 * 60_000; // 检测到 agy CLI 桥接时后台静默刷新官方配额周期（10 分钟）
+const rawIntervalMs = Number(process.env.AGY_AUTO_UPDATE_INTERVAL_MS);
+const AUTO_UPDATE_INTERVAL_MS =
+  Number.isFinite(rawIntervalMs) && rawIntervalMs >= 60_000 && rawIntervalMs <= 2_147_483_647
+    ? Math.floor(rawIntervalMs)
+    : 10 * 60_000; // 后台静默自动检查更新周期（默认 10 分钟，支持环境变量自定义）
 const IS_CANONICAL_PROD_INSTANCE =
   process.env.AGY_DISABLE_AUTO_UPDATE !== "1" && HOST === "127.0.0.1" && PORT === 4318; // 正式常驻生产主实例判定（自更新循环与重启确认共享同一口径）
 
@@ -48,7 +55,7 @@ function confirmAppliedUpdateState(attempt = 0): void {
 }
 
 /**
- * 职责：启动后台静默自更新循环（启动 15 秒后首检，之后每 10 分钟检查一次，工作区干净且落后远端时自动拉取构建并重启）。
+ * 职责：启动后台静默自更新循环（启动 15 秒后首检，之后按周期检查，默认 10 分钟，可通过 AGY_AUTO_UPDATE_INTERVAL_MS 配置）。
  * 思路：仅在正式常驻生产主实例下运行；有未提交改动时 update.mjs 自动跳过，绝不覆盖本地开发改动。
  */
 function startSilentAutoUpdateLoop(): () => void {
@@ -61,29 +68,27 @@ function startSilentAutoUpdateLoop(): () => void {
     running = true;
     execFile(
       process.execPath,
-      [UPDATE_SCRIPT, "--no-restart", "--json"],
-      { cwd: REPO_ROOT, timeout: 180_000, maxBuffer: 2 * 1024 * 1024 },
+      [UPDATE_SCRIPT, "--no-restart", "--no-notify", "--json"],
+      { cwd: REPO_ROOT, timeout: 560_000, maxBuffer: 2 * 1024 * 1024 },
       (_err, stdout) => {
         running = false;
         const text = (stdout || "").trim();
         if (!text) return;
         try {
-          const res = JSON.parse(text) as {
-            ok?: boolean;
-            updated?: boolean;
-            needRestart?: boolean;
-            message?: string;
-          };
-          if (res.ok && res.updated) {
-            console.log(`[AntiGravity Token Radar] Auto-update applied: ${res.message}`);
-            if (res.needRestart && fs.existsSync(SERVICE_SCRIPT)) {
-              const child = spawn(process.execPath, [SERVICE_SCRIPT, "restart"], {
+          const res = JSON.parse(text) as Record<string, unknown>;
+          if (res.ok === true && res.updated === true) {
+            console.log(`[AntiGravity Token Radar] Auto-update applied: ${String(res.message || "")}`);
+            const action = resolveUpdateServiceAction(res);
+            if (action && fs.existsSync(SERVICE_SCRIPT)) {
+              const child = spawn(process.execPath, [SERVICE_SCRIPT, action], {
                 cwd: REPO_ROOT,
                 detached: true,
                 stdio: "ignore",
               });
               child.unref();
             }
+          } else if (res.ok === false && !res.busy && res.message) {
+            console.warn(`[AntiGravity Token Radar] Auto-update skipped/failed: ${String(res.message)}`);
           }
         } catch {
           /* 静默忽略非 JSON 输出 */
@@ -94,6 +99,82 @@ function startSilentAutoUpdateLoop(): () => void {
 
   const initTimer = setTimeout(runOnce, 15_000);
   const pollTimer = setInterval(runOnce, AUTO_UPDATE_INTERVAL_MS);
+  initTimer.unref();
+  pollTimer.unref();
+  return () => {
+    clearTimeout(initTimer);
+    clearInterval(pollTimer);
+  };
+}
+
+/**
+ * 职责：查找本机可用的官方 agy CLI 可执行文件路径（优先检查官方默认 ~/.local/bin/agy，再回退扫描 PATH）。
+ */
+function findAgyBinary(): string | null {
+  const defaultBin = path.join(os.homedir(), ".local", "bin", process.platform === "win32" ? "agy.exe" : "agy");
+  const candidates = [
+    defaultBin,
+    ...(process.env.PATH || "")
+      .split(path.delimiter)
+      .filter(Boolean)
+      .map((dir) => path.join(dir, process.platform === "win32" ? "agy.exe" : "agy")),
+  ];
+  for (const bin of candidates) {
+    try {
+      fs.accessSync(bin, fs.constants.X_OK);
+      if (fs.statSync(bin).isFile()) return bin;
+    } catch {
+      /* 忽略不可执行路径 */
+    }
+  }
+  return null;
+}
+
+/**
+ * 职责：确认 agy CLI 已启用本项目的 statusline-bridge 桥接配置，避免对未接入或自定义 statusLine 的用户静默调用 agy。
+ */
+function isAgyBridgeEnabled(): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(AGY_SETTINGS_PATH, "utf8")) as {
+      statusLine?: { enabled?: boolean; command?: unknown };
+    };
+    const sl = parsed?.statusLine;
+    return Boolean(
+      sl &&
+        typeof sl === "object" &&
+        sl.enabled !== false &&
+        typeof sl.command === "string" &&
+        sl.command.includes("statusline-bridge.mjs")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 职责：仅当本机装有 agy CLI 且启用了本桥接时，每 10 分钟零 Token 静默运行一次 `agy models` 触发官方 statusLine 刷新周剩配额。
+ */
+function startAgyQuotaSyncLoop(): () => void {
+  if (!IS_CANONICAL_PROD_INSTANCE) {
+    return () => undefined;
+  }
+  let running = false;
+  const runOnce = () => {
+    if (running || !isAgyBridgeEnabled()) return;
+    const agyBin = findAgyBinary();
+    if (!agyBin) return;
+    running = true;
+    execFile(
+      agyBin,
+      ["models"],
+      { cwd: os.tmpdir(), timeout: 25_000, maxBuffer: 512 * 1024 },
+      () => {
+        running = false;
+      }
+    );
+  };
+  const initTimer = setTimeout(runOnce, 20_000);
+  const pollTimer = setInterval(runOnce, LIVE_QUOTA_SYNC_INTERVAL_MS);
   initTimer.unref();
   pollTimer.unref();
   return () => {
@@ -122,8 +203,8 @@ function listenOptionalMirror(factory: () => Server, port: number, host: string)
  * 参数：无（读取环境变量 PORT、HOST、AGY_DATA_DIR）。
  */
 function bootstrapServer(): void {
-  // 0. 组装多数据源聚合服务与 HTTP 路由实例工厂（自动发现原生 + T3 Code 隔离账号目录）
-  const provider = createMultiSourceTelemetryService(process.env.AGY_DATA_DIR);
+  // 0. 组装聚合服务与 HTTP 路由实例工厂
+  const provider = createTelemetryService(process.env.AGY_DATA_DIR);
   const makeServer = () => createTelemetryHttpServer(provider, { staticDir: STATIC_DIR });
   const servers: Server[] = [];
 
@@ -133,12 +214,8 @@ function bootstrapServer(): void {
   primary.listen(PORT, HOST, () => {
     confirmAppliedUpdateState();
     const health = provider.getHealth();
-    const sources = provider.getSources?.() ?? [];
     console.log(`[AntiGravity Token Radar] Local server listening at http://${HOST}:${PORT} (and http://localhost:${PORT})`);
     console.log(`[AntiGravity Token Radar] Data source: ${health.dataDir} (convs=${health.conversationDbCount}, transcripts=${health.transcriptCount})`);
-    if (sources.length > 1) {
-      console.log(`[AntiGravity Token Radar] Sources: ${sources.map((s) => `${s.label}(${s.id})`).join(", ")}`);
-    }
   });
 
   if (HOST === "127.0.0.1") {
@@ -150,10 +227,12 @@ function bootstrapServer(): void {
   }
 
   const stopAutoUpdate = startSilentAutoUpdateLoop();
+  const stopQuotaSync = startAgyQuotaSyncLoop();
 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
       stopAutoUpdate();
+      stopQuotaSync();
       for (const s of servers) {
         try {
           s.close();

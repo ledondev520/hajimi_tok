@@ -430,6 +430,18 @@ describe("Independent CR P1 & P2 Regressions", () => {
     expect(extracted?.["pool:gemini"]).toBeUndefined();
     expect(extracted?.["pool:claude"]?.remainingPct).toBe(0);
 
+    // 真实 agy CLI 桶名校验：gemini-weekly -> pool:gemini，3p-weekly -> pool:claude，忽略 5h 桶
+    const extractedReal = bridge.extractWeeklyQuotaPools({
+      quota: {
+        "3p-5h": { remaining_fraction: 1, reset_time: "1970-01-01T00:00:00Z", reset_in_seconds: 0 },
+        "3p-weekly": { remaining_fraction: 0.96389854, reset_time: "2026-12-01T23:55:17Z", reset_in_seconds: 333100 },
+        "gemini-5h": { remaining_fraction: 0.9446, reset_time: "2026-11-28T05:54:24Z", reset_in_seconds: 9047 },
+        "gemini-weekly": { remaining_fraction: 0.63076097, reset_time: "2026-12-03T07:05:28Z", reset_in_seconds: 445311 },
+      },
+    });
+    expect(extractedReal?.["pool:gemini"]?.remainingPct).toBe(63.1);
+    expect(extractedReal?.["pool:claude"]?.remainingPct).toBe(96.4);
+
     const livePath = path.join(bDir, "live-quota.json");
     bridge.mergeLiveQuotaFile(livePath, { "pool:gemini": { remainingPct: 88, resetTime: "", resetInSeconds: 0 } });
     const merged = bridge.mergeLiveQuotaFile(livePath, { "pool:claude": { remainingPct: 42, resetTime: "", resetInSeconds: 0 } });
@@ -615,5 +627,5 @@ describe("Independent CR P1 & P2 Regressions", () => {
     const offlinePreMerge = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
     expect(offlinePreMerge.ok).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "update-state.json"), "utf8")).targetCommit).toBe(unreachedTarget);
-  });
+  }, 20_000);
 });

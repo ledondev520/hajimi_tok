@@ -70,8 +70,6 @@ export interface ConversationUsageSummary {
   estimatedCostUsd: number; // 等效 API 总成本（USD）
   cacheSavedUsd: number; // 缓存累计节省成本（USD）
   subagentCount: number; // 直接挂载的子代理会话数量
-  sourceId?: string; // 多数据源模式下归属源 ID（如 native / t3:antigravity）
-  sourceLabel?: string; // 多数据源模式下归属源展示名称
   cacheTtl?: CacheTtlSummary; // 基于会话内相邻间隔实测反推的缓存 TTL 摘要
 }
 
@@ -267,29 +265,8 @@ export interface QuotaCycleInfo {
   available7dCycles?: QuotaCycleOption[]; // 全部可选的 7 天周周期列表（按时间倒序）
 }
 
-/** 本地数据源类型（原生 Antigravity / T3 Code 隔离账号实例 / 自定义目录） */
-export type DataSourceKind = "native" | "t3" | "custom";
-
-/** 单个本地数据源（账号实例）汇总信息 */
-export interface DataSourceInfo {
-  id: string; // 唯一数据源 ID（如 native、t3:antigravity）
-  label: string; // 可读展示名称（如 原生 Antigravity 或 T3 settings.json displayName）
-  kind: DataSourceKind; // 数据源类型
-  dataDir: string; // 实际扫描目录绝对路径
-  exists: boolean; // 目录是否存在
-  conversationCount: number; // 当前筛选条件下命中会话数
-  callCount: number; // 当前筛选条件下 LLM 调用数
-  totalTokens: number; // 当前筛选条件下总 Token
-  todayTotalTokens: number; // 今日消耗总 Token
-  todayEstimatedCostUsd: number; // 今日等效 API 成本（USD）
-  estimatedCostUsd: number; // 当前筛选条件下等效 API 成本（USD）
-  cacheHitRate: number; // 当前筛选条件下缓存命中率（0 ~ 1）
-  lastActiveAt: string; // 最近活跃时间 ISO-8601
-}
-
 /** 查询过滤参数 */
 export interface TelemetryFilterOptions {
-  source?: string; // 可选数据源 ID（"all" 表示合并全部本机数据源）
   cycle?: QuotaCycleMode; // 配额周期模式（5h / prev-5h / 7d / prev-7d / today / all）
   days?: number; // 最近 N 天（CLI 兼容参数，不传或 0 表示全部时间）
   workspace?: string; // 按项目名或路径过滤
@@ -297,7 +274,6 @@ export interface TelemetryFilterOptions {
   search?: string; // 按标题/提示词/会话 ID 模糊搜索
   includeArchived?: boolean; // 是否包含归档会话（默认 true）
   forceRefresh?: boolean; // 是否跳过文件缓存强制重扫
-  nodeLimit?: number; // 可选调用时间线尾节点上限（0 表示跳过生成，默认 5000）
   nowMs?: number; // 可选基准当前毫秒时间戳（供单测确定性校验周期切分）
 }
 
@@ -328,8 +304,6 @@ export interface DashboardSummaryPayload {
   defaultPricing: ModelPriceRate[]; // 服务端默认单价表
   cacheTtl?: CacheTtlSummary; // 当前筛选范围全局实测缓存 TTL 摘要与 6 档衰减曲线
   liveQuota?: Record<string, LivePoolQuotaSnapshot>; // 若本机装有 agy CLI 并接入 statusLine，返回各池实时官方周剩余
-  activeSource?: string; // 当前选中的数据源 ID（多源模式下为 "all" 或单账号 ID）
-  sources?: DataSourceInfo[]; // 本机发现的全部数据源及各自消耗拆解（仅多源或显式启用时返回）
 }
 
 /** 供 HTTP 服务与 CLI 注入的遥测提供者接口 */
@@ -351,29 +325,23 @@ export interface WeeklyQuotaCalibration {
 
 export interface TelemetryProvider {
   getSummary(options?: TelemetryFilterOptions): DashboardSummaryPayload;
-  getConversationDetail(conversationId: string, source?: string): ConversationDetail | null;
-  getHealth(source?: string): DataSourceHealth;
-  getSources?(): DataSourceInfo[];
-  getResets?(source?: string): QuotaResetEvent[];
-  addReset?(
-    input: { timestamp: string; pool: "all" | "gemini" | "claude"; note?: string },
-    source?: string
-  ): QuotaResetEvent[];
-  deleteReset?(id: string, source?: string): QuotaResetEvent[];
-  getCalibrations?(source?: string): Record<string, WeeklyQuotaCalibration>;
-  getCalibrationsState?(source?: string):
+  getConversationDetail(conversationId: string): ConversationDetail | null;
+  getHealth(): DataSourceHealth;
+  getResets?(): QuotaResetEvent[];
+  addReset?(input: { timestamp: string; pool: "all" | "gemini" | "claude"; note?: string }): QuotaResetEvent[];
+  deleteReset?(id: string): QuotaResetEvent[];
+  getCalibrations?(): Record<string, WeeklyQuotaCalibration>;
+  getCalibrationsState?():
     | { ok: true; calibrations: Record<string, WeeklyQuotaCalibration>; initialized: boolean }
     | { ok: false; error: string };
-  isCalibrationsInitialized?(source?: string): boolean;
+  isCalibrationsInitialized?(): boolean;
   setCalibration?(
     key: string,
     value: WeeklyQuotaCalibration,
-    options?: { source?: "manual" | "auto" },
-    sourceId?: string
+    options?: { source?: "manual" | "auto" }
   ): Record<string, WeeklyQuotaCalibration>;
   migrateCalibrationsBatch?(
-    entries: Record<string, WeeklyQuotaCalibration>,
-    sourceId?: string
+    entries: Record<string, WeeklyQuotaCalibration>
   ): { conflict: boolean; calibrations: Record<string, WeeklyQuotaCalibration> };
-  deleteCalibration?(key: string, deletedAt?: string, sourceId?: string): Record<string, WeeklyQuotaCalibration>;
+  deleteCalibration?(key: string, deletedAt?: string): Record<string, WeeklyQuotaCalibration>;
 }

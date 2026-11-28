@@ -4,7 +4,7 @@
  * Pos: 看板中部核心双图之一（图 1），将近 7 天双轴分模型 Token/费用折线与今日单次节点调用增量折线合二为一（src/components/DailyUsageCard.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays } from "lucide-react";
 import type {
   CallNodePoint,
@@ -185,7 +185,7 @@ export function extractTodayCallSummary(
  * 参数：props — 包含 dailyTrend、callTimeline、byModel 及跨图联动状态。
  * 返回值：与右侧 TPS 折线图等高对齐的趋势折线卡片。
  */
-export const DailyUsageCard = memo(function DailyUsageCard({
+export function DailyUsageCard({
   dailyTrend,
   callTimeline,
   byModel,
@@ -246,10 +246,10 @@ export const DailyUsageCard = memo(function DailyUsageCard({
     return () => ro.disconnect();
   }, [granularity]);
 
-  // 1.1. 仅在「今日」模式下筛选自然今日的单次调用节点，默认按日模式零遍历开销
+  // 1.1. 筛选本地自然今日的单次调用节点并汇总今日分模型数据供「今日」模式图例使用
   const { todayNodes, todayByModel } = useMemo(
-    () => (granularity === "today" ? extractTodayCallSummary(callTimeline, byModel) : { todayNodes: [], todayByModel: [] }),
-    [granularity, callTimeline, byModel]
+    () => extractTodayCallSummary(callTimeline, byModel),
+    [callTimeline, byModel]
   );
 
   // 1.2. 整理「近7天」按日分模型序列数据
@@ -787,4 +787,4 @@ export const DailyUsageCard = memo(function DailyUsageCard({
       </CardContent>
     </Card>
   );
-});
+}

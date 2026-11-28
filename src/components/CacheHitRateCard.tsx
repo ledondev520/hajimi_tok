@@ -4,7 +4,7 @@
  * Pos: 看板中部趋势可视化扩展卡片，专门追踪 Prompt 缓存命中率波动与实测缓存 TTL 衰减曲线（src/components/CacheHitRateCard.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Percent } from "lucide-react";
 import type {
   CacheTtlSummary,
@@ -98,7 +98,7 @@ const PAD_BOTTOM = 22; // 底部日期横轴留白
  * 参数：props — dailyTrend、callTimeline、byModel 及跨图联动回调。
  * 返回值：shadcn Card 包裹的缓存率趋势折线卡片。
  */
-export const CacheHitRateCard = memo(function CacheHitRateCard({
+export function CacheHitRateCard({
   dailyTrend,
   callTimeline,
   byModel,
@@ -152,10 +152,10 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
     return () => ro.disconnect();
   }, [granularity]);
 
-  // 1.1. 仅在「今日」模式下遍历自然今日单次调用节点
+  // 1.1. 复用自然今日单次调用节点汇总供「今日」模式使用
   const { todayNodes, todayByModel } = useMemo(
-    () => (granularity === "today" ? extractTodayCallSummary(callTimeline, byModel) : { todayNodes: [], todayByModel: [] }),
-    [granularity, callTimeline, byModel]
+    () => extractTodayCallSummary(callTimeline, byModel),
+    [callTimeline, byModel]
   );
 
   // 1.2. 整理「近7天」按日整体与分模型家族缓存命中率序列
@@ -627,4 +627,4 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
       </CardContent>
     </Card>
   );
-});
+}
