@@ -330,4 +330,125 @@ describe("Multi-Source Service, HTTP API & CLI (server/multiSource.ts)", () => {
     expect(report).toContain("Personal Beta");
     expect(report).toContain("t3:acct_a");
   });
+
+  it("applies shared-resets.json to merged and T3 accounts, isolates dismissal, and supports nodeLimit & ETag 304", async () => {
+    const homeDir = mkTempDir("agy-shared-reset-home-");
+    const t3Root = path.join(homeDir, ".t3", "userdata");
+    const stateRoot = path.join(homeDir, ".hamiji-sta");
+    const sharedFile = path.join(homeDir, "shared-resets.json");
+    const hashA = crypto.createHash("sha256").update("acct_a").digest("hex");
+    const hashB = crypto.createHash("sha256").update("acct_b").digest("hex");
+    const dirA = path.join(t3Root, "providers", "antigravity", hashA, "antigravity-acp");
+    const dirB = path.join(t3Root, "providers", "antigravity", hashB, "antigravity-acp");
+
+    fs.mkdirSync(t3Root, { recursive: true });
+    fs.writeFileSync(
+      path.join(t3Root, "settings.json"),
+      JSON.stringify({
+        providerInstances: {
+          acct_a: { driver: "antigravity", displayName: "Acct A" },
+          acct_b: { driver: "antigravity", displayName: "Acct B" },
+        },
+      })
+    );
+    fs.writeFileSync(
+      sharedFile,
+      JSON.stringify([
+        { id: "s-nov24", timestamp: "2026-11-23T23:38:23.000Z", pool: "gemini", note: "周二提前重置" },
+        { id: "s-nov26", timestamp: "2026-11-26T07:04:48.000Z", pool: "gemini", note: "周四提前重置" },
+      ])
+    );
+
+    // 分别在 11-23（旧期）、11-25（11-24 重置后）与 11-27（11-26 重置后）写入调用
+    seedAntigravityDataDir(dirA, {
+      conversationId: "conv-a-old",
+      title: "A before Nov24",
+      workspace: "ws-a",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 1000,
+      cache: 0,
+      output: 100,
+      timestampMs: Date.parse("2026-11-23T10:00:00.000Z"),
+    });
+    seedAntigravityDataDir(dirA, {
+      conversationId: "conv-a-new",
+      title: "A after Nov26",
+      workspace: "ws-a",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 2000,
+      cache: 0,
+      output: 200,
+      timestampMs: Date.parse("2026-11-27T10:00:00.000Z"),
+    });
+    seedAntigravityDataDir(dirB, {
+      conversationId: "conv-b-mid",
+      title: "B between Nov24 and Nov26",
+      workspace: "ws-b",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 3000,
+      cache: 0,
+      output: 300,
+      timestampMs: Date.parse("2026-11-25T10:00:00.000Z"),
+    });
+    seedAntigravityDataDir(dirB, {
+      conversationId: "conv-b-new",
+      title: "B after Nov26",
+      workspace: "ws-b",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 4000,
+      cache: 0,
+      output: 400,
+      timestampMs: Date.parse("2026-11-27T12:00:00.000Z"),
+    });
+
+    const service = createMultiSourceTelemetryService("", undefined, {
+      homeDir,
+      t3UserdataDir: t3Root,
+      stateRootDir: stateRoot,
+      sharedResetsPath: sharedFile,
+    });
+    const nowMs = Date.parse("2026-11-28T03:00:00.000Z");
+
+    // 1. 合并视图与两个 T3 单账号均继承 shared-resets.json，当前 7d 起点严格对齐 11-26 15:04 (07:04:48Z)
+    const all7d = service.getSummary({ source: "all", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(all7d.quotaWindow?.windowStart).toBe("2026-11-26T07:04:48.000Z");
+    expect(all7d.totals.totalTokens).toBe(2200 + 4400);
+
+    const a7d = service.getSummary({ source: "t3:acct_a", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(a7d.quotaWindow?.windowStart).toBe("2026-11-26T07:04:48.000Z");
+    expect(a7d.totals.totalTokens).toBe(2200);
+    expect(service.getResets?.("t3:acct_a").map((r) => r.id)).toEqual(["s-nov24", "s-nov26"]);
+
+    const b7d = service.getSummary({ source: "t3:acct_b", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(b7d.quotaWindow?.windowStart).toBe("2026-11-26T07:04:48.000Z");
+    expect(b7d.totals.totalTokens).toBe(4400);
+
+    // 2. 隐藏单账号下的公共重置不影响另一账号
+    service.deleteReset?.("s-nov26", "t3:acct_a");
+    expect(service.getResets?.("t3:acct_a").map((r) => r.id)).toEqual(["s-nov24"]);
+    expect(service.getResets?.("t3:acct_b").map((r) => r.id)).toEqual(["s-nov24", "s-nov26"]);
+
+    // 3. HTTP nodeLimit 与 ETag / 304 Not Modified 短路
+    const server = createTelemetryHttpServer(service);
+    activeServers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const limitedRes = await fetch(`${baseUrl}/api/summary?cycle=all&nodeLimit=1`);
+    expect(limitedRes.status).toBe(200);
+    const etag = limitedRes.headers.get("etag");
+    expect(etag).toBeTruthy();
+    const limitedJson = (await limitedRes.json()) as DashboardSummaryPayload;
+    expect(limitedJson.callTimeline).toHaveLength(1);
+
+    const notModifiedRes = await fetch(`${baseUrl}/api/summary?cycle=all&nodeLimit=1`, {
+      headers: { "If-None-Match": etag! },
+    });
+    expect(notModifiedRes.status).toBe(304);
+  });
 });

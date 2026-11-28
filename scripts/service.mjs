@@ -1,6 +1,6 @@
 /**
  * Input: node:child_process、node:fs、node:os、node:path，管理 macOS launchd 用户级 LaunchAgent。
- * Output: 提供 install / restart / stop / status 子命令，使本地 4318 统计服务开机自启并崩溃自愈常驻。
+ * Output: 提供 install / restart / stop / status 子命令，使本地 4318 统计服务开机自启、崩溃自愈，并在 install 时无侵入自动接入 agy statusLine 与 400K 压缩软提醒 Hook。
  * Pos: macOS 常驻守护进程编排脚本（scripts/service.mjs）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -111,6 +111,17 @@ async function main(action) {
       });
     } catch {
       /* 桥接安装失败不影响常驻服务启动 */
+    }
+    // 1.1.2. 若本机存在 ~/.gemini 配置目录且未显式跳过，自动无侵入注册 400K 上下文压缩软提醒 Hook（保留已有 Hook，可随时 hook:compact:uninstall 卸载）
+    if (process.env.AGY_SKIP_COMPACT_HOOK !== "1" && fs.existsSync(path.join(os.homedir(), ".gemini"))) {
+      try {
+        execFileSync(process.execPath, [path.join(ROOT, "scripts", "compact-reminder-hook.mjs"), "--install"], {
+          stdio: "inherit",
+          timeout: 5000,
+        });
+      } catch {
+        /* 压缩提醒 Hook 安装失败不影响常驻服务启动 */
+      }
     }
     return;
   }

@@ -17,7 +17,7 @@ npm run update           # 手动更新（常驻服务已内置每 10 分钟静�
 npm run service:status   # 查看服务状态（另有 service:restart / service:stop）
 npm run stats            # 终端汇总（支持 --source <id> / --days 7 / --workspace <name> / --json）
 npm run dev              # 开发热更新（:5173）
-npm run hook:compact:install   # 可选：注册 400K 上下文 /compact 软提醒全局 Hook（hook:compact:uninstall 卸载）
+npm run hook:compact:install   # 手动安装/重装 400K 上下文 /compact 软提醒全局 Hook（service:install 已默认无侵入自动安装；hook:compact:uninstall 卸载）
 ```
 
 ## 功能
@@ -28,4 +28,4 @@ npm run hook:compact:install   # 可选：注册 400K 上下文 /compact 软提�
 - **周满额与重置日历**：输入官方剩余 `%` 反算周满额（装有 `agy` CLI 时自动通过官方 `statusLine` 回填）；`/calendar` 查看公共强制重置与个人重置日历。
 - **趋势与缓存 TTL**：每日/今日消耗、缓存命中率（自动区分新会话首轮与真失效）、实测 TTL 衰减曲线与单次 TPS。
 - **主会话明细**：Subagent 自动合并折叠、表头直点排序、`/` 搜索、「缓存仍热」一键筛选、逐轮倒序明细弹窗。
-- **可选 400K 压缩软提醒**：手动开启 `hook:compact:install` 后，每个压缩周期上下文首次达到 400K 时在对话中内联弹醒目大字提示并在末尾拟好 `/compact` 指令（零熔断，默认零侵入不自动写入）。
+- **400K 上下文压缩软提醒**：`npm run service:install` 会自动无侵入注册至 `~/.gemini/config/hooks.json`（保留已有 Hook、跳过同名自定义配置，设 `AGY_SKIP_COMPACT_HOOK=1` 可跳过，或随时 `npm run hook:compact:uninstall` 卸载）；每个压缩周期上下文首次达到 400K（约 512K 的 78%）时在对话中内联弹醒目提示并在末尾拟好 `/compact` 指令（零熔断）。

@@ -4,7 +4,7 @@
  * Pos: 看板首屏紧凑 KPI 概览层，单行并排展示四张高信息密度卡片（src/components/KpiCards.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { BrainCircuit, Coins, Info, Layers, Zap } from "lucide-react";
 import type {
   GlobalKpiTotals,
@@ -57,7 +57,7 @@ export interface KpiCardsProps {
  * 参数：props — 包含 totals 核心统计、byModel 分模型拆解、mainConversationCount 主会话数及可选 activeModelLabel / quotaWindow / activeSource。
  * 返回值：响应式四卡紧凑 KPI 网格节点。
  */
-export function KpiCards({
+export const KpiCards = memo(function KpiCards({
   totals,
   byModel = [],
   mainConversationCount,
@@ -636,7 +636,7 @@ export function KpiCards({
               </Tooltip>
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-400 tabular-nums">
-              <span>
+              <span className="hidden sm:inline">
                 {mainConversationCount}会话 · {formatExactNumber(totals.callCount)}轮
               </span>
               <Coins className="size-3.5 text-amber-500" />
@@ -789,4 +789,4 @@ export function KpiCards({
       </Card>
     </section>
   );
-}
+});

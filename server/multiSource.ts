@@ -17,6 +17,7 @@ import type {
 } from "../src/types/telemetry";
 import { createTelemetryService, type TelemetryServiceOptions } from "./aggregator";
 import { DEFAULT_MODEL_PRICING } from "./pricing";
+import { resolveSharedResetsPath } from "./resetStore";
 import { createTelemetryScanner } from "./scanner";
 import {
   discoverLocalDataSources,
@@ -200,14 +201,17 @@ export function createMultiSourceTelemetryService(
     return createTelemetryService(only?.dataDir ?? customDataDir, pricing, options);
   }
 
-  // 1.1. 为每个数据源创建共享扫描器与独立校准/重置存储的单源服务
+  // 1.1. 为每个数据源创建共享扫描器与独立校准/重置存储的单源服务（同时继承仓库公共强制重置日历 shared-resets.json）
+  const isolatedState = Boolean(options.isolated);
+  const sharedResetsPath =
+    options.sharedResetsPath ?? (!isolatedState ? (resolveSharedResetsPath() ?? undefined) : undefined);
   const entries: SourceEntry[] = discovered.map((meta) => {
     const rawScanner = createTelemetryScanner(meta.dataDir, pricing);
     const taggedScanner = createTaggedScanner(rawScanner, meta);
-    const isolatedState = Boolean(options.isolated);
     const sourceOpts: TelemetryServiceOptions = {
       ...options,
       scanner: taggedScanner,
+      ...(sharedResetsPath ? { sharedResetsPath } : {}),
       ...(meta.stateDir && !isolatedState
         ? {
             resetsPath: path.join(meta.stateDir, "resets.json"),
@@ -228,6 +232,8 @@ export function createMultiSourceTelemetryService(
   const mergedProvider = createTelemetryService(undefined, pricing, {
     ...options,
     isolated: true,
+    resetsPath: null,
+    ...(sharedResetsPath ? { sharedResetsPath } : {}),
     useEnvAnchors: false,
     scanner: mergedScanner,
   });
@@ -242,7 +248,7 @@ export function createMultiSourceTelemetryService(
   };
 
   const buildSourcesList = (filterOpts: TelemetryFilterOptions = {}): DataSourceInfo[] => {
-    const perSourceOpts: TelemetryFilterOptions = { ...filterOpts, source: undefined };
+    const perSourceOpts: TelemetryFilterOptions = { ...filterOpts, source: undefined, nodeLimit: 0 };
     return entries
       .map((entry) => buildSourceInfo(entry.meta, entry.provider.getSummary(perSourceOpts)))
       .sort((a, b) => b.estimatedCostUsd - a.estimatedCostUsd || b.totalTokens - a.totalTokens);

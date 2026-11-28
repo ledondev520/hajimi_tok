@@ -4,6 +4,7 @@
  * Pos: 看板多数据源切换与各账号消耗对比层，仅在发现 >=2 个本地数据源（如 T3 Code 多账号 + 原生目录）时渲染。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
+import { memo } from "react";
 import { Layers, Monitor, Users } from "lucide-react";
 import type { DataSourceInfo } from "@/types/telemetry";
 import { formatPercent, formatTokens, formatUsd } from "@/lib/format";
@@ -21,7 +22,7 @@ export interface SourceSwitcherBarProps {
  * 参数：props — sources 数据源清单、activeSource 当前选中项、onSelectSource 切换回调。
  * 返回值：多数据源切换栏节点（单源时返回 null）。
  */
-export function SourceSwitcherBar({
+export const SourceSwitcherBar = memo(function SourceSwitcherBar({
   sources,
   activeSource,
   onSelectSource,
@@ -123,4 +124,4 @@ export function SourceSwitcherBar({
       )}
     </section>
   );
-}
+});

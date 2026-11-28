@@ -89,9 +89,9 @@ function normalizeResetList(raw: unknown, keepDismissed = false): StoredLocalRes
  * 参数：customPath — 可选本机文件路径；customSharedPath — 可选仓库公共种子路径。
  * 返回值：包含 list / add / remove 的存储对象。
  */
-export function createResetStore(customPath?: string, customSharedPath?: string) {
-  const filePath = resolveResetStorePath(customPath);
-  const sharedPath = resolveSharedResetsPath(customPath, customSharedPath);
+export function createResetStore(customPath?: string | null, customSharedPath?: string) {
+  const filePath = customPath === null ? null : resolveResetStorePath(customPath);
+  const sharedPath = resolveSharedResetsPath(customPath ?? undefined, customSharedPath);
 
   const readShared = (): QuotaResetEvent[] => {
     if (!sharedPath || !fs.existsSync(sharedPath)) return [];
@@ -104,7 +104,7 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
   };
 
   const readLocalStrict = (): StoredLocalResetEvent[] => {
-    if (!fs.existsSync(filePath)) return [];
+    if (!filePath || !fs.existsSync(filePath)) return [];
     let parsed: unknown;
     try {
       parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -174,6 +174,7 @@ export function createResetStore(customPath?: string, customSharedPath?: string)
   };
 
   const writeLocalRaw = (list: StoredLocalResetEvent[]): QuotaResetEvent[] => {
+    if (!filePath) throw new Error("只读公共重置存储不支持本地写入");
     const normalized = normalizeResetList(list, true);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;

@@ -297,6 +297,7 @@ export interface TelemetryFilterOptions {
   search?: string; // 按标题/提示词/会话 ID 模糊搜索
   includeArchived?: boolean; // 是否包含归档会话（默认 true）
   forceRefresh?: boolean; // 是否跳过文件缓存强制重扫
+  nodeLimit?: number; // 可选调用时间线尾节点上限（0 表示跳过生成，默认 5000）
   nowMs?: number; // 可选基准当前毫秒时间戳（供单测确定性校验周期切分）
 }
 

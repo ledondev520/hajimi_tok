@@ -167,8 +167,8 @@ function getFileMtimeMs(filePath: string): number {
  * 返回值："{mtimeMs}:{size}" 或缺失时的 "0:0"。
  */
 function getFileSig(filePath: string): string {
-  // 0. statSync 获取修改时间与大小
-  try { const st = fs.statSync(filePath); return `${st.mtimeMs}:${st.size}`; } catch { return "0:0"; }
+  // 0. statSync 获取修改时间、大小与 inode，防止同毫秒替换误命中缓存
+  try { const st = fs.statSync(filePath); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return "0:0:0"; }
 }
 
 /**
@@ -399,6 +399,9 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
   let scanVersion = 0; // 数据实际变更版本号，供聚合层安全命中结果缓存
   let lastScanAt = 0; // 上次完整增量扫描的时间戳
   let lastSnapshot: { conversations: ConversationDetail[]; health: DataSourceHealth; version: number } | null = null;
+  let lastSummarySig = ""; // conversation_summaries.db + -wal 指纹缓存，未变时免拷贝重开 SQLite
+  let lastSummaryMap = new Map<string, SummaryDbRow>();
+  let lastSummaryMode: "wal-readonly" | "immutable-fallback" | "none" = "none";
 
   return {
     /**
@@ -412,7 +415,7 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
         return lastSnapshot;
       }
       const t0 = performance.now();
-      if (forceRefresh) cache.clear();
+      if (forceRefresh) { cache.clear(); lastSummarySig = ""; }
       let changed = forceRefresh || lastSnapshot === null;
       const warnings: string[] = [];
       let sqliteReadMode: "wal-readonly" | "immutable-fallback" | "none" = "none";
@@ -436,11 +439,16 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
         return lastSnapshot;
       }
 
-      // 1. 读取 conversation_summaries.db
-      const summaryMap = new Map<string, SummaryDbRow>();
+      // 1. 读取 conversation_summaries.db（文件与 -wal 指纹未变时复用内存索引，免重复临时拷贝）
+      let summaryMap = new Map<string, SummaryDbRow>();
       let summaryDbAvailable = false;
       const sumDbPath = path.join(dataDir, "conversation_summaries.db");
-      if (fs.existsSync(sumDbPath)) {
+      const sumSig = `${getFileSig(sumDbPath)}#${getFileSig(`${sumDbPath}-wal`)}`;
+      if (!forceRefresh && sumSig !== "0:0:0#0:0:0" && sumSig === lastSummarySig) {
+        summaryMap = lastSummaryMap;
+        summaryDbAvailable = true;
+        trackMode(lastSummaryMode);
+      } else if (fs.existsSync(sumDbPath)) {
         let opened: ReturnType<typeof openSqliteSafe> | null = null;
         try {
           opened = openSqliteSafe(sumDbPath);
@@ -450,8 +458,14 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
             .all() as unknown as SummaryDbRow[];
           summaryDbAvailable = true;
           for (const r of rows) if (r.conversation_id) summaryMap.set(r.conversation_id, r);
-        } catch (e) { warnings.push(`读取 conversation_summaries.db 失败: ${(e as Error).message}`); }
+          lastSummarySig = sumSig;
+          lastSummaryMap = summaryMap;
+          lastSummaryMode = opened.mode;
+        } catch (e) { lastSummarySig = ""; warnings.push(`读取 conversation_summaries.db 失败: ${(e as Error).message}`); }
         finally { try { opened?.db.close(); } catch { /* ignore */ } opened?.cleanup(); }
+      } else {
+        lastSummarySig = "";
+        lastSummaryMap = new Map<string, SummaryDbRow>();
       }
 
       // 2. 收集会话 ID 并集

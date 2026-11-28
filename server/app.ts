@@ -6,11 +6,13 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
+import zlib from "node:zlib";
 import type {
   ConversationUsageSummary,
   QuotaCycleMode,
@@ -155,7 +157,7 @@ function setCorsHeaders(res: http.ServerResponse, trustedOrigin: string | null):
     res.setHeader("Access-Control-Allow-Origin", trustedOrigin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, If-None-Match");
   }
 }
 
@@ -196,15 +198,38 @@ function sendJson(
   payload: unknown,
   extraHeaders?: Record<string, string>,
   trustedOrigin: string | null = null,
+  req?: http.IncomingMessage,
+  enableEtag = false,
 ): void {
-  // 0. 序列化响应体并注入统一头信息
+  // 0. 序列化响应体，按需执行 ETag 304 短路与大载荷（>=16KB）快速 gzip 压缩
   const body = JSON.stringify(payload);
   setCorsHeaders(res, trustedOrigin);
-  res.writeHead(statusCode, {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json; charset=utf-8",
     ...extraHeaders,
-  });
+  };
+  if (enableEtag && statusCode === 200) {
+    const etag = `"${crypto.createHash("sha1").update(body).digest("base64url")}"`;
+    headers.ETag = etag;
+    headers["Cache-Control"] = "no-cache";
+    const inm = String(req?.headers["if-none-match"] || "").trim();
+    if (inm === etag || inm === `W/${etag}`) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+  }
+  const acceptEnc = String(req?.headers["accept-encoding"] || "");
+  if (body.length >= 16_384 && /\bgzip\b/i.test(acceptEnc)) {
+    const gz = zlib.gzipSync(body, { level: 1 });
+    headers["Content-Encoding"] = "gzip";
+    headers.Vary = trustedOrigin ? "Origin, Accept-Encoding" : "Accept-Encoding";
+    res.writeHead(statusCode, headers);
+    res.end(gz);
+    return;
+  }
   // 1.1. 输出 UTF-8 JSON 正文并结束响应
+  res.writeHead(statusCode, headers);
   res.end(body);
 }
 
@@ -242,6 +267,9 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
   const includeArchived = url.searchParams.get("includeArchived") !== "false";
   const rawRefresh = url.searchParams.get("refresh");
   const forceRefresh = rawRefresh === "1" || rawRefresh === "true";
+  const rawNodeLimit = url.searchParams.get("nodeLimit");
+  const parsedLimit = rawNodeLimit !== null && rawNodeLimit !== "" ? Number(rawNodeLimit) : NaN;
+  const nodeLimit = Number.isFinite(parsedLimit) && parsedLimit >= 0 ? Math.min(5000, Math.floor(parsedLimit)) : undefined;
 
   return {
     ...(source ? { source } : {}),
@@ -252,6 +280,7 @@ export function parseSummaryQuery(url: URL): TelemetryFilterOptions {
     search,
     includeArchived,
     forceRefresh,
+    ...(nodeLimit !== undefined ? { nodeLimit } : {}),
   };
 }
 
@@ -664,10 +693,14 @@ export function createTelemetryHttpServer(
 
       if (pathname === "/api/summary") {
         const filters = parseSummaryQuery(url);
-        replyJson(
+        sendJson(
+          res,
           200,
           provider.getSummary(filters),
-          buildId ? { "X-Hamiji-Build": buildId } : undefined
+          buildId ? { "X-Hamiji-Build": buildId } : undefined,
+          trustedOrigin,
+          req,
+          true
         );
         return;
       }
