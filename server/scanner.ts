@@ -1,7 +1,7 @@
 /**
- * Input: node:sqlite、node:fs、node:path、node:os，以及 ./protobuf、./pricing 与 src/types/telemetry.ts。
- * Output: 导出 resolveDefaultDataDir、openSqliteSafe、parseWorkspaceUris、parsePbtxtAnnotation 与 createTelemetryScanner（含 worktree/Swarm/临时目录项目归并）。
- * Pos: 服务端数据采集核心层，零侵入只读融合 SQLite gen_metadata、transcript.jsonl、conversation_summaries 与 pbtxt，并归并 T3/Swarm 工作树与临时目录至真实项目名。
+ * Input: node:sqlite、node:fs、node:path、node:os，以及 ./protobuf、./pricing、./workspaceNormalize 与 src/types/telemetry.ts。
+ * Output: 导出 resolveDefaultDataDir、openSqliteSafe、parseWorkspaceUris、TEMP_CHAT_WORKSPACE、parsePbtxtAnnotation 与 createTelemetryScanner。
+ * Pos: 服务端数据采集核心层，零侵入只读融合 SQLite gen_metadata、transcript.jsonl、conversation_summaries 与 pbtxt，并委托工作区归一化与空壳会话过滤。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 
@@ -12,16 +12,16 @@ import { DatabaseSync } from "node:sqlite";
 import type { ConversationDetail, DataSourceHealth, ModelPriceRate, StepUsageRecord } from "../src/types/telemetry";
 import { calculateStepCost, DEFAULT_MODEL_PRICING, matchModelRate } from "./pricing";
 import { decodeGenMetadata, type ParsedGenMetadata } from "./protobuf";
+import {
+  filterEmptyConversations,
+  normalizeConversationWorkspaces,
+  parseWorkspaceUris,
+  TEMP_CHAT_WORKSPACE,
+} from "./workspaceNormalize";
 
-const UNBOUND_WORKSPACE = "(未绑定工作区)"; // 空工作区默认展示名
-const TEMP_WORKSPACE = "(临时/测试工作区)"; // 系统临时目录、安装探针与脑区 scratch 归并展示名
+export { parseWorkspaceUris, TEMP_CHAT_WORKSPACE };
+
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: false }); // pbtxt 八进制转义解码器
-const GIT_WORKTREE_CACHE = new Map<string, string | null>(); // worktree 路径 -> 主仓库根路径缓存
-const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const SWARM_PATH_RE = new RegExp(`[/\\\\]worktrees[/\\\\](${UUID_RE})[/\\\\](?:swarm-|[^/\\\\]+-[0-9a-f]{6,}$)`, "i");
-const T3_WORKTREE_PATH_RE = /[/\\]\.t3[/\\]worktrees[/\\]([^/\\]+)[/\\][^/\\]+$/i;
-const T3_HASH_NAME_RE = /^t3-[0-9a-f]{6,}-[0-9a-f]{6,}$/i;
-const SWARM_HASH_NAME_RE = /^swarm-[a-z0-9_-]+-[0-9a-f]{6,}$/i;
 
 /** conversation_summaries 表查询行结构 */
 interface SummaryDbRow {
@@ -194,6 +194,7 @@ function normalizeIsoTime(raw: unknown, fallbackIso: string): string {
   }
   if (typeof raw === "string" && raw.trim()) {
     const s = raw.trim();
+    if (/^0001-01-01(?:\b|T|\s)/.test(s)) return fallbackIso;
     if (/^\d+(\.\d+)?$/.test(s)) {
       const n = Number(s);
       return Number.isFinite(n) && n > 0 ? safeFromMs(n < 1e11 ? n * 1000 : n) : fallbackIso;
@@ -202,106 +203,6 @@ function normalizeIsoTime(raw: unknown, fallbackIso: string): string {
     if (!Number.isNaN(ms)) return safeFromMs(ms);
   }
   return fallbackIso;
-}
-
-/** 读取 git worktree 的 .git 指针文件并反查主仓库根路径（带缓存） */
-function resolveGitWorktreeMainRepo(worktreePath: string): string | null {
-  if (!worktreePath) return null;
-  if (GIT_WORKTREE_CACHE.has(worktreePath)) return GIT_WORKTREE_CACHE.get(worktreePath) ?? null;
-  let mainRepo: string | null = null;
-  try {
-    const dotGit = path.join(worktreePath, ".git");
-    if (fs.existsSync(dotGit) && fs.statSync(dotGit).isFile()) {
-      const raw = fs.readFileSync(dotGit, "utf8").slice(0, 512);
-      const m = raw.match(/^\s*gitdir:\s*(.+?)\s*$/m);
-      if (m) {
-        const resolvedGitDir = path.isAbsolute(m[1]) ? m[1] : path.resolve(worktreePath, m[1]);
-        const wtMatch = resolvedGitDir.match(/^(.+?)[/\\]\.git[/\\]worktrees[/\\][^/\\]+[/\\]?$/i);
-        if (wtMatch && wtMatch[1]) {
-          mainRepo = wtMatch[1].replace(/[/\\]+$/, "");
-        }
-      }
-    }
-  } catch { /* ignore unreadable worktree */ }
-  if (GIT_WORKTREE_CACHE.size >= 256) GIT_WORKTREE_CACHE.clear();
-  GIT_WORKTREE_CACHE.set(worktreePath, mainRepo);
-  return mainRepo;
-}
-
-/** 从已删除的 T3 worktree 路径中提取正式项目名（如 ~/.t3/worktrees/<project>/t3-xxx） */
-function extractT3WorktreeProject(workspacePath: string): string | null {
-  const m = workspacePath.match(T3_WORKTREE_PATH_RE);
-  return m && m[1] ? m[1].trim() : null;
-}
-
-/** 从 Swarm / ACP 工作树路径提取父协调者会话 UUID */
-function extractSwarmCoordinatorId(workspacePath: string): string | null {
-  const m = workspacePath.match(SWARM_PATH_RE);
-  return m && m[1] ? m[1] : null;
-}
-
-/** 判定路径是否属于系统临时目录、安装探针或脑区 scratch 测试目录 */
-function isTempOrScratchWorkspace(workspacePath: string): boolean {
-  if (!workspacePath) return false;
-  if (/^\/(?:private\/)?tmp$/i.test(workspacePath)) return true;
-  if (/^\/(?:private\/)?var\/folders\/[^/]+\/[^/]+\/T(?:\/|$)/i.test(workspacePath)) return true;
-  if (/[/\\](?:\.gemini[/\\]antigravity|antigravity-acp)[/\\]brain[/\\][^/\\]+[/\\]scratch(?:[/\\]|$)/i.test(workspacePath)) return true;
-  if (/[/\\]antigravity-tmp[/\\]/i.test(workspacePath)) return true;
-  if (/^\/(?:private\/)?tmp\/(?:t3-antigravity-setup-|agy-rule-check-|tmp[_-]?[a-z0-9]{5,})/i.test(workspacePath)) return true;
-  return false;
-}
-
-/** 判定工作区是否为 Swarm 临时工作树或非正式项目占位名 */
-function isEphemeralSwarmWorkspace(name: string, wsPath: string): boolean {
-  return SWARM_HASH_NAME_RE.test(name) || extractSwarmCoordinatorId(wsPath) !== null;
-}
-
-function isNonProjectWorkspace(name: string, wsPath: string): boolean {
-  return (
-    !name ||
-    name === UNBOUND_WORKSPACE ||
-    name === TEMP_WORKSPACE ||
-    T3_HASH_NAME_RE.test(name) ||
-    isEphemeralSwarmWorkspace(name, wsPath)
-  );
-}
-
-/**
- * 职责：解析 workspace_uris JSON 字段，解码 file:// URI 并自动归一化 git worktree、T3 worktree 与临时/测试目录为正式项目名。
- * 思路：1) 解码首个 URI 为本地路径；2) 优先通过 .git worktree 指针反查主仓库；3) 回退解析 ~/.t3/worktrees/<项目名>/...；4) 将系统临时/scratch 目录收拢至 "(临时/测试工作区)"。
- * 参数：rawUris — conversation_summaries.workspace_uris 原始值。
- * 返回值：{ workspaceUri, workspacePath, workspaceName }。
- */
-export function parseWorkspaceUris(rawUris: unknown): { workspaceUri: string; workspacePath: string; workspaceName: string } {
-  // 0. 提取首个工作区 URI 并解码为本地路径
-  let workspaceUri = "";
-  if (typeof rawUris === "string" && rawUris.trim()) {
-    try { const arr = JSON.parse(rawUris); if (Array.isArray(arr) && typeof arr[0] === "string") workspaceUri = arr[0].trim(); }
-    catch { if (rawUris.trim().startsWith("file://")) workspaceUri = rawUris.trim(); }
-  }
-  let workspacePath = "";
-  if (workspaceUri.startsWith("file://")) {
-    try { workspacePath = decodeURIComponent(new URL(workspaceUri).pathname); }
-    catch { workspacePath = decodeURIComponent(workspaceUri.replace(/^file:\/\//, "")); }
-  } else if (workspaceUri) workspacePath = workspaceUri;
-  if (workspacePath.length > 1) workspacePath = workspacePath.replace(/\/+$/, "");
-  if (!workspacePath) return { workspaceUri, workspacePath: "", workspaceName: UNBOUND_WORKSPACE };
-
-  // 1.1. 存在 .git worktree 指针文件时直接归并到主仓库真实项目名与路径
-  const gitMainRepo = resolveGitWorktreeMainRepo(workspacePath);
-  if (gitMainRepo) {
-    return { workspaceUri, workspacePath: gitMainRepo, workspaceName: path.basename(gitMainRepo) || gitMainRepo };
-  }
-  // 1.2. worktree 已被清理时，从 ~/.t3/worktrees/<项目名>/t3-xxx 路径还原正式项目名
-  const t3Project = extractT3WorktreeProject(workspacePath);
-  if (t3Project) {
-    return { workspaceUri, workspacePath, workspaceName: t3Project };
-  }
-  // 1.3. 系统临时目录、t3 安装探针与 brain scratch 统一收拢，避免刷屏污染项目排行
-  if (isTempOrScratchWorkspace(workspacePath)) {
-    return { workspaceUri, workspacePath, workspaceName: TEMP_WORKSPACE };
-  }
-  return { workspaceUri, workspacePath, workspaceName: path.basename(workspacePath) || workspacePath };
 }
 
 /**
@@ -646,38 +547,17 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
         conversations.push(detail);
       }
 
-      // 4. 清理过期缓存、回填直接子代理数、归并 Swarm/子代理工作区并美化无标题子代理名称
+      // 4. 清理过期缓存、归并 Swarm/子代理工作区、过滤无调用空壳并回填子代理数与标题
       for (const k of cache.keys()) if (!allIds.has(k)) { cache.delete(k); changed = true; }
       const byId = new Map(conversations.map((c) => [c.conversationId, c]));
-      const resolveAncestorProject = (conv: ConversationDetail): { workspaceName: string; workspacePath: string } | null => {
-        const seen = new Set<string>([conv.conversationId]);
-        let nextId = conv.parentConversationId || extractSwarmCoordinatorId(conv.workspacePath) || "";
-        while (nextId && !seen.has(nextId)) {
-          seen.add(nextId);
-          const anc = byId.get(nextId);
-          if (!anc) break;
-          if (!isNonProjectWorkspace(anc.workspaceName, anc.workspacePath)) {
-            return { workspaceName: anc.workspaceName, workspacePath: anc.workspacePath };
-          }
-          nextId = anc.parentConversationId || extractSwarmCoordinatorId(anc.workspacePath) || "";
-        }
-        return null;
-      };
+      normalizeConversationWorkspaces(conversations, byId);
+      const activeConversations = filterEmptyConversations(conversations, byId);
+      const activeById = new Map(activeConversations.map((c) => [c.conversationId, c]));
       const childCounts = new Map<string, number>();
-      for (const c of conversations) {
-        // 4.0. Swarm 工作树 / 非正式子代理工作区统一归并回父会话真实项目；孤儿 Swarm 目录收拢到临时测试工作区
-        if (isNonProjectWorkspace(c.workspaceName, c.workspacePath)) {
-          const parentWs = resolveAncestorProject(c);
-          if (parentWs) {
-            c.workspaceName = parentWs.workspaceName;
-            c.workspacePath = parentWs.workspacePath;
-          } else if (isEphemeralSwarmWorkspace(c.workspaceName, c.workspacePath)) {
-            c.workspaceName = TEMP_WORKSPACE;
-          }
-        }
+      for (const c of activeConversations) {
         if (c.parentConversationId) {
           childCounts.set(c.parentConversationId, (childCounts.get(c.parentConversationId) ?? 0) + 1);
-          const parent = byId.get(c.parentConversationId);
+          const parent = activeById.get(c.parentConversationId) ?? byId.get(c.parentConversationId);
           if (parent && c.title.startsWith("会话 ")) {
             const roleTag = c.agentName || c.conversationId.slice(0, 8);
             c.title = `${parent.title} · 子代理 (${roleTag})`;
@@ -702,12 +582,12 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
           }
         }
       }
-      for (const c of conversations) c.subagentCount = childCounts.get(c.conversationId) ?? 0;
+      for (const c of activeConversations) c.subagentCount = childCounts.get(c.conversationId) ?? 0;
 
       if (changed) scanVersion++;
       lastScanAt = hadAnyReadError ? 0 : Date.now();
       lastSnapshot = {
-        conversations,
+        conversations: activeConversations,
         health: {
           dataDir, exists: true, summaryDbAvailable, conversationDbCount, transcriptCount,
           sqliteReadMode, scanDurationMs: Math.round(performance.now() - t0), scannedAt: new Date().toISOString(), warnings,

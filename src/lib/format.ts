@@ -623,7 +623,7 @@ export function recalculateSummaryWithCustomRates(
       conv.outputTokens,
       rate
     );
-    const wsKey = conv.workspacePath || conv.workspaceName;
+    const wsKey = conv.workspaceName || "临时对话";
     workspaceCostMap.set(wsKey, (workspaceCostMap.get(wsKey) ?? 0) + estimatedCostUsd);
     convCostSum += estimatedCostUsd;
     convSavedSum += cacheSavedUsd;
@@ -632,7 +632,7 @@ export function recalculateSummaryWithCustomRates(
 
   // 2.2. 更新工作区拆解与日/小时趋势序列
   const byWorkspace = summary.byWorkspace.map((ws) => {
-    const wsKey = ws.workspacePath || ws.workspaceName;
+    const wsKey = ws.workspaceName || "临时对话";
     const mapped = workspaceCostMap.get(wsKey);
     const fallback = calculateTokenCost(
       ws.inputTokens,

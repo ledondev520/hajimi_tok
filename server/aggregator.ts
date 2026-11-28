@@ -26,7 +26,7 @@ import {
   matchesModelQuery,
   resolveQuotaCycleBlocks,
 } from "./quotaCycle";
-import { createTelemetryScanner } from "./scanner";
+import { createTelemetryScanner, TEMP_CHAT_WORKSPACE } from "./scanner";
 import {
   createCalibrationStore,
   createResetStore,
@@ -395,7 +395,7 @@ export function createTelemetryService(
         cacheSavedUsd += conv.cacheSavedUsd;
 
         // 2.1. 工作区维度累加
-        const wk = conv.workspaceName || "(未绑定工作区)";
+        const wk = conv.workspaceName || TEMP_CHAT_WORKSPACE;
         const curWs = wsAgg.get(wk) ?? {
           workspaceName: wk, workspacePath: conv.workspacePath, conversationCount: 0, subagentCount: 0,
           callCount: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0,

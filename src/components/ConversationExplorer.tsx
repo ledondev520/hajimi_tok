@@ -554,7 +554,7 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                           title={root.workspaceName ? "点击按该项目筛选" : undefined}
                           className="inline-flex h-5 max-w-28 cursor-pointer items-center truncate rounded-md border border-slate-200 px-1.5 text-[11px] font-normal text-slate-700 transition-colors hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-indigo-500 dark:hover:text-indigo-400"
                         >
-                          {root.workspaceName || "未绑定"}
+                          {root.workspaceName || "临时对话"}
                         </button>
                       </TableCell>
 

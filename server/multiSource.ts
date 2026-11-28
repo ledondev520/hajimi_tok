@@ -156,8 +156,18 @@ function createTaggedScanner(
   };
 }
 
+/** 判定跨源同 conversationId 的两条快照哪条更完整（优先步数更多、Token 更多、状态明确与更新时间更新） */
+function isBetterConversationRecord(next: ConversationDetail, prev: ConversationDetail): boolean {
+  if (next.steps.length !== prev.steps.length) return next.steps.length > prev.steps.length;
+  if (next.totalTokens !== prev.totalTokens) return next.totalTokens > prev.totalTokens;
+  const nextKnown = Boolean(next.status && next.status !== "unknown");
+  const prevKnown = Boolean(prev.status && prev.status !== "unknown");
+  if (nextKnown !== prevKnown) return nextKnown;
+  return next.lastModifiedAt > prev.lastModifiedAt;
+}
+
 /**
- * 职责：构造跨数据源合并扫描器，复用各单源增量缓存并将全部会话与健康指标合并输出。
+ * 职责：构造跨数据源合并扫描器，复用各单源增量缓存、按 conversationId 去重并将全部会话与健康指标合并输出。
  * 参数：entries — 各数据源及其共享扫描器列表。
  * 返回值：供合并态 "all" TelemetryProvider 使用的扫描器。
  */
@@ -179,7 +189,7 @@ function createMergedScanner(entries: SourceEntry[]): TelemetryScannerInstance {
       compositeSig = nextSig;
       mergedVersion += 1;
 
-      const conversations: ConversationDetail[] = [];
+      const byConvId = new Map<string, ConversationDetail>();
       let exists = false;
       let summaryDbAvailable = false;
       let conversationDbCount = 0;
@@ -201,16 +211,20 @@ function createMergedScanner(entries: SourceEntry[]): TelemetryScannerInstance {
         }
         for (const w of snap.health.warnings) warnings.push(`[${meta.label}] ${w}`);
         for (const c of snap.conversations) {
-          conversations.push({
+          const tagged: ConversationDetail = {
             ...c,
             sourceId: meta.id,
             sourceLabel: meta.label,
-          });
+          };
+          const prev = byConvId.get(c.conversationId);
+          if (!prev || isBetterConversationRecord(tagged, prev)) {
+            byConvId.set(c.conversationId, tagged);
+          }
         }
       }
 
       lastMerged = {
-        conversations,
+        conversations: [...byConvId.values()],
         health: {
           dataDir: `本机多账号合并 (${entries.length} 个数据源)`,
           exists,

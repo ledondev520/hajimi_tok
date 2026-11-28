@@ -1,7 +1,7 @@
 /**
- * Input: vitest 断言原语、node:fs、node:os、node:path、node:sqlite，以及 ../server/scanner 与 ../server/aggregator。
- * Output: 校验 T3 worktree、git worktree、Swarm 子代理工作树及临时/scratch 目录自动归并到正式项目名的端到端行为。
- * Pos: 工作区名称归一化与项目去噪专项单测（tests/workspaceNormalize.test.ts）。
+ * Input: vitest 断言原语、node:fs、node:os、node:path、node:sqlite，以及 ../server/{scanner,aggregator,multiSource} 与 ../src/lib/format。
+ * Output: 校验 worktree/Swarm 项目归并、未绑定与临时目录合并为「临时对话」、空壳/老 .pb 会话过滤、跨源去重及前端单价重算工作区一致性。
+ * Pos: 工作区名称归一化、空壳会话治理与跨源去重专项单测（tests/workspaceNormalize.test.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import fs from "node:fs";
@@ -10,7 +10,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryService } from "../server/aggregator";
-import { parseWorkspaceUris } from "../server/scanner";
+import { createMultiSourceTelemetryService } from "../server/multiSource";
+import { parseWorkspaceUris, TEMP_CHAT_WORKSPACE } from "../server/scanner";
+import { recalculateSummaryWithCustomRates } from "../src/lib/format";
 
 const createdDirs: string[] = [];
 
@@ -18,6 +20,39 @@ function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   createdDirs.push(dir);
   return dir;
+}
+
+function createSummaryTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id text primary key,
+      title text,
+      step_count integer,
+      last_modified_time text,
+      workspace_uris text,
+      status text,
+      agent_name text,
+      parent_conversation_id text,
+      nesting_depth integer
+    );
+  `);
+}
+
+function writeJsonlStep(dataDir: string, id: string, ts: string, inputTokens: number): void {
+  const logDir = path.join(dataDir, "brain", id, ".system_generated", "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(logDir, "transcript.jsonl"),
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      created_at: ts,
+      model: "gemini-4-neon",
+      input_tokens: inputTokens,
+      cache_read_tokens: 0,
+      output_tokens: 100,
+    }) + "\n"
+  );
 }
 
 afterEach(() => {
@@ -50,7 +85,9 @@ describe("parseWorkspaceUris worktree & temp normalization", () => {
     expect(parsed.workspaceName).toBe("hajimi_tok");
   });
 
-  it("collapses macOS temp dirs, t3 setup probes, and brain scratch dirs into (临时/测试工作区)", () => {
+  it("merges unbound, macOS temp dirs, t3 setup probes, and brain scratch dirs into 临时对话", () => {
+    expect(parseWorkspaceUris("").workspaceName).toBe(TEMP_CHAT_WORKSPACE);
+    expect(parseWorkspaceUris("[]").workspaceName).toBe(TEMP_CHAT_WORKSPACE);
     const samples = [
       "file:///var/folders/m7/nvwypzm13hs3yj_yzr3173dr0000gn/T/t3-antigravity-setup-vWMKnd",
       "file:///var/folders/m7/nvwypzm13hs3yj_yzr3173dr0000gn/T/tmp_7o5wfc3",
@@ -59,40 +96,33 @@ describe("parseWorkspaceUris worktree & temp normalization", () => {
       "file:///Users/demo/.gemini/antigravity/brain/89bcae13-4191-42c7-ad0c-676eb7390ebd/scratch/hook-test",
     ];
     for (const uri of samples) {
-      expect(parseWorkspaceUris(JSON.stringify([uri])).workspaceName).toBe("(临时/测试工作区)");
+      expect(parseWorkspaceUris(JSON.stringify([uri])).workspaceName).toBe(TEMP_CHAT_WORKSPACE);
     }
     // Named project under /tmp/ws1 stays intact for backwards compatibility
     expect(parseWorkspaceUris(JSON.stringify(["file:///tmp/ws1"])).workspaceName).toBe("ws1");
   });
 });
 
-describe("scanner parent-project inheritance for Swarm workers and aggregation", () => {
-  it("merges Swarm workers and T3 worktrees into parent projects and collapses orphan Swarm / temp dirs", () => {
+describe("scanner workspace normalization, empty-shell filtering, and cross-source dedup", () => {
+  it("merges Swarm/T3 worktrees, collapses unbound+temp into 临时对话, drops 0-call shells while keeping parents of active subagents", () => {
     const dataDir = makeTempDir("hajimi-scan-norm-");
     fs.mkdirSync(path.join(dataDir, "conversations"), { recursive: true });
     fs.mkdirSync(path.join(dataDir, "brain"), { recursive: true });
 
     const db = new DatabaseSync(path.join(dataDir, "conversation_summaries.db"));
-    db.exec(`
-      CREATE TABLE conversation_summaries (
-        conversation_id text primary key,
-        title text,
-        step_count integer,
-        last_modified_time text,
-        workspace_uris text,
-        status text,
-        agent_name text,
-        parent_conversation_id text,
-        nesting_depth integer
-      );
-    `);
+    createSummaryTable(db);
 
     const coordId = "7577917e-99db-41cd-8b4e-84db882db24f";
     const swarmChildId = "72d8fba2-afc9-4dce-9199-0185ac9846b5";
     const swarmPathOnlyId = "bab5cf27-5e7f-4514-86be-62599298c58c";
     const orphanSwarmId = "11111111-2222-3333-4444-555555555555";
     const t3WtConvId = "22222222-3333-4444-5555-666666666666";
-    const setupProbeId = "33333333-4444-5555-6666-777777777777";
+    const setupProbeActiveId = "33333333-4444-5555-6666-777777777777";
+    const unboundChatId = "44444444-5555-6666-7777-888888888888";
+    const zeroShellProbeId = "55555555-6666-7777-8888-999999999999";
+    const legacyPbProjectId = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+    const zeroParentWithChildId = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+    const activeChildOfZeroParentId = "88888888-9999-aaaa-bbbb-cccccccccccc";
 
     const ins = db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     ins.run(coordId, "主会话", 2, "2026-11-28T05:00:00Z", JSON.stringify(["file:///Users/demo/Cursor/jiesong_system"]), "done", "", "", 0);
@@ -141,53 +171,142 @@ describe("scanner parent-project inheritance for Swarm workers and aggregation",
       0
     );
     ins.run(
-      setupProbeId,
-      "Setup Probe",
+      setupProbeActiveId,
+      "Hook Test",
       1,
       "2026-11-28T05:05:00Z",
-      JSON.stringify(["file:///var/folders/m7/xyz/T/t3-antigravity-setup-vWMKnd"]),
+      JSON.stringify(["file:///var/folders/m7/xyz/T/agy-rule-check-qobdebk6"]),
       "done",
       "",
       "",
       0
     );
+    ins.run(unboundChatId, "原生随手聊", 2, "2026-11-28T05:06:00Z", "", "done", "", "", 0);
+    // 0-call system probe with Go zero time -> must be dropped
+    ins.run(
+      zeroShellProbeId,
+      "",
+      0,
+      "0001-01-01 00:00:00+00:00",
+      JSON.stringify(["file:///var/folders/m7/xyz/T/t3-antigravity-setup-vWMKnd"]),
+      "CASCADE_RUN_STATUS_IDLE",
+      "",
+      "",
+      0
+    );
+    // Legacy .pb index-only project with 0 calls / 0 tokens -> must be dropped
+    ins.run(
+      legacyPbProjectId,
+      "",
+      63,
+      "2026-03-08 10:19:48+00:00",
+      JSON.stringify(["file:///Users/demo/Cursor/codex_token"]),
+      "CASCADE_RUN_STATUS_IDLE",
+      "",
+      "",
+      0
+    );
+    // 0-call parent that HAS an active subagent -> parent must be preserved
+    ins.run(
+      zeroParentWithChildId,
+      "空壳父会话",
+      1,
+      "2026-11-28T05:07:00Z",
+      JSON.stringify(["file:///Users/demo/Cursor/jiesong_system"]),
+      "done",
+      "",
+      "",
+      0
+    );
+    ins.run(
+      activeChildOfZeroParentId,
+      "",
+      1,
+      "2026-11-28T05:08:00Z",
+      "",
+      "done",
+      "research",
+      zeroParentWithChildId,
+      1
+    );
     db.close();
 
-    const writeStep = (id: string, ts: string, tokens: number) => {
-      const logDir = path.join(dataDir, "brain", id, ".system_generated", "logs");
-      fs.mkdirSync(logDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(logDir, "transcript.jsonl"),
-        JSON.stringify({
-          step_index: 1,
-          type: "PLANNER_RESPONSE",
-          created_at: ts,
-          model: "gemini-4-neon",
-          input_tokens: tokens,
-          cache_read_tokens: 0,
-          output_tokens: 100,
-        }) + "\n"
-      );
-    };
-    writeStep(coordId, "2026-11-28T05:00:00Z", 1000);
-    writeStep(swarmChildId, "2026-11-28T05:01:00Z", 2000);
-    writeStep(swarmPathOnlyId, "2026-11-28T05:02:00Z", 3000);
-    writeStep(orphanSwarmId, "2026-11-28T05:03:00Z", 400);
-    writeStep(t3WtConvId, "2026-11-28T05:04:00Z", 4000);
-    writeStep(setupProbeId, "2026-11-28T05:05:00Z", 100);
+    writeJsonlStep(dataDir, coordId, "2026-11-28T05:00:00Z", 1000);
+    writeJsonlStep(dataDir, swarmChildId, "2026-11-28T05:01:00Z", 2000);
+    writeJsonlStep(dataDir, swarmPathOnlyId, "2026-11-28T05:02:00Z", 3000);
+    writeJsonlStep(dataDir, orphanSwarmId, "2026-11-28T05:03:00Z", 400);
+    writeJsonlStep(dataDir, t3WtConvId, "2026-11-28T05:04:00Z", 4000);
+    writeJsonlStep(dataDir, setupProbeActiveId, "2026-11-28T05:05:00Z", 100);
+    writeJsonlStep(dataDir, unboundChatId, "2026-11-28T05:06:00Z", 500);
+    writeJsonlStep(dataDir, activeChildOfZeroParentId, "2026-11-28T05:08:00Z", 600);
 
-    const service = createTelemetryService(dataDir);
+    const service = createTelemetryService(dataDir, undefined, { isolated: true });
     const summary = service.getSummary({ cycle: "all" });
 
     const wsNames = summary.byWorkspace.map((w) => w.workspaceName).sort();
-    expect(wsNames).toEqual(["(临时/测试工作区)", "jiesong_system"]);
+    expect(wsNames).toEqual(["jiesong_system", TEMP_CHAT_WORKSPACE]);
+    expect(summary.availableWorkspaces.sort()).toEqual(["jiesong_system", TEMP_CHAT_WORKSPACE]);
+
+    // Legacy 0-token codex_token and 0001-01-01 setup probe are gone
+    expect(summary.conversations.some((c) => c.conversationId === zeroShellProbeId)).toBe(false);
+    expect(summary.conversations.some((c) => c.conversationId === legacyPbProjectId)).toBe(false);
+    // Zero-call parent of active child stays and passes project name down
+    expect(summary.conversations.some((c) => c.conversationId === zeroParentWithChildId)).toBe(true);
 
     const jiesong = summary.byWorkspace.find((w) => w.workspaceName === "jiesong_system")!;
-    expect(jiesong.conversationCount).toBe(4);
-    expect(jiesong.inputTokens).toBe(1000 + 2000 + 3000 + 4000);
+    expect(jiesong.conversationCount).toBe(6);
+    expect(jiesong.inputTokens).toBe(1000 + 2000 + 3000 + 4000 + 600);
 
-    const tempWs = summary.byWorkspace.find((w) => w.workspaceName === "(临时/测试工作区)")!;
-    expect(tempWs.conversationCount).toBe(2);
-    expect(tempWs.inputTokens).toBe(400 + 100);
+    const tempWs = summary.byWorkspace.find((w) => w.workspaceName === TEMP_CHAT_WORKSPACE)!;
+    expect(tempWs.conversationCount).toBe(3);
+    expect(tempWs.inputTokens).toBe(400 + 100 + 500);
+
+    // Frontend custom pricing recalculation aggregates by workspaceName consistently across merged paths
+    const recalc = recalculateSummaryWithCustomRates(summary, [
+      { modelPattern: "*", label: "Flat", inputPerMillion: 10, cacheReadPerMillion: 1, outputPerMillion: 20 },
+    ]);
+    const recalcTemp = recalc.byWorkspace.find((w) => w.workspaceName === TEMP_CHAT_WORKSPACE)!;
+    const expectedTempCost = (1000 / 1_000_000) * 10 + (300 / 1_000_000) * 20;
+    expect(recalcTemp.estimatedCostUsd).toBeCloseTo(expectedTempCost, 8);
+  });
+
+  it("deduplicates identical conversationId across merged multi-account sources", () => {
+    const dirA = makeTempDir("hajimi-dedup-a-");
+    const dirB = makeTempDir("hajimi-dedup-b-");
+    const sharedId = "99999999-aaaa-bbbb-cccc-dddddddddddd";
+
+    for (const [dir, status, tokens] of [
+      [dirA, "unknown", 500],
+      [dirB, "CASCADE_RUN_STATUS_IDLE", 1500],
+    ] as const) {
+      fs.mkdirSync(path.join(dir, "brain"), { recursive: true });
+      const db = new DatabaseSync(path.join(dir, "conversation_summaries.db"));
+      createSummaryTable(db);
+      db.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+        sharedId,
+        "共享历史会话",
+        1,
+        "2026-11-28T06:00:00Z",
+        JSON.stringify(["file:///Users/demo/Cursor/hajimi_tok"]),
+        status,
+        "",
+        "",
+        0
+      );
+      db.close();
+      writeJsonlStep(dir, sharedId, "2026-11-28T06:00:00Z", tokens);
+    }
+
+    const multi = createMultiSourceTelemetryService(undefined, undefined, {
+      isolated: true,
+      sources: [
+        { id: "src:a", label: "A", kind: "t3", dataDir: dirA },
+        { id: "src:b", label: "B", kind: "t3", dataDir: dirB },
+      ],
+    });
+    const all = multi.getSummary({ cycle: "all" });
+    expect(all.conversations).toHaveLength(1);
+    expect(all.conversations[0].inputTokens).toBe(1500);
+    expect(all.conversations[0].sourceLabel).toBe("B");
   });
 });
