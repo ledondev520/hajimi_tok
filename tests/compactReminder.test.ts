@@ -20,11 +20,11 @@ interface HookModule {
   CARD_HEADING_PREFIX: string;
   handlePreInvocation: (payload: Record<string, unknown>) => Record<string, unknown>;
   handleStop: (payload: Record<string, unknown>) => Record<string, unknown>;
-  installCompactReminderHook: (opts?: { hooksPath?: string; expectedCmd?: string }) => {
+  installCompactReminderHook: (opts?: { hooksPath?: string; expectedCmd?: string; auto?: boolean; optOutPath?: string | null }) => {
     installed: boolean;
     reason: string;
   };
-  uninstallCompactReminderHook: (opts?: { hooksPath?: string; expectedCmd?: string }) => {
+  uninstallCompactReminderHook: (opts?: { hooksPath?: string; expectedCmd?: string; optOutPath?: string | null }) => {
     removed: boolean;
     reason: string;
   };
@@ -292,5 +292,15 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
 
     fs.writeFileSync(hooksPath, "{broken", "utf8");
     expect(mod.installCompactReminderHook({ hooksPath }).installed).toBe(false);
+
+    // 4. --auto-install 自动推送安装；卸载写入退订标记后自动推送跳过；显式 --install 清除退订并恢复安装
+    const autoHooksPath = path.join(dir, "auto-hooks.json");
+    const optOutPath = path.join(dir, "compact-hook-disabled");
+    expect(mod.installCompactReminderHook({ hooksPath: autoHooksPath, optOutPath, auto: true }).installed).toBe(true);
+    expect(mod.uninstallCompactReminderHook({ hooksPath: autoHooksPath, optOutPath }).removed).toBe(true);
+    expect(fs.existsSync(optOutPath)).toBe(true);
+    expect(mod.installCompactReminderHook({ hooksPath: autoHooksPath, optOutPath, auto: true }).installed).toBe(false);
+    expect(mod.installCompactReminderHook({ hooksPath: autoHooksPath, optOutPath, auto: false }).installed).toBe(true);
+    expect(fs.existsSync(optOutPath)).toBe(false);
   });
 });

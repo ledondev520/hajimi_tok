@@ -3,14 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "哈吉米统计 — Standalone local telemetry & token usage analytics dashboard + CLI for Google AntiGravity",
+  "description": "哈吉米统计 — Standalone local telemetry & token usage analytics dashboard for Google AntiGravity",
   "engines": {
     "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "NODE_OPTIONS='--no-warnings' node scripts/dev.mjs",
     "start": "NODE_OPTIONS='--no-warnings' tsx server/index.ts",
-    "stats": "NODE_OPTIONS='--no-warnings' tsx server/cli.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS='--no-warnings' vitest run",

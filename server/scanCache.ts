@@ -1,7 +1,7 @@
 /**
  * Input: node:crypto、node:fs、node:path、node:zlib 与 ../src/types/telemetry 类型契约。
  * Output: 导出 resolveScanCachePath、computePricingSig 与 createPersistentScanCache，提供带 schema/费率指纹校验、原子落盘与异步防抖的扫描缓存持久化能力。
- * Pos: 服务端本地扫描索引持久化层，将 150+ 会话库与轨迹解析结果按文件指纹缓存至 ~/.hamiji-sta/scan-cache/*.json.gz，加速常驻服务重启冷启动与 npm run stats CLI。
+ * Pos: 服务端本地扫描索引持久化层，将 150+ 会话库与轨迹解析结果按文件指纹缓存至 ~/.hamiji-sta/scan-cache/*.json.gz，加速常驻服务重启冷启动。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import crypto from "node:crypto";

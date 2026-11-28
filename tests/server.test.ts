@@ -1,7 +1,7 @@
 /**
- * Input: vitest 断言工具、node:fs/http/os/path 模块，以及 server/app.ts 与 server/cliRender.ts 待测模块。
- * Output: 验证 HTTP 遥测服务路由、查询转发、来源安全边界、静态安全托管与 CLI 解析渲染的完整测试套件。
- * Pos: 服务端 API 层与终端 CLI 展示层的自动化契约与回归测试。
+ * Input: vitest 断言工具、node:fs/http/os/path 模块，以及 server/app.ts 与 server/resetStore.ts 待测模块。
+ * Output: 验证 HTTP 遥测服务路由、查询转发、来源安全边界与静态安全托管的完整测试套件。
+ * Pos: 服务端 API 层的自动化契约与回归测试。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 
@@ -13,7 +13,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryHttpServer } from "../server/app";
 import { createCalibrationStore } from "../server/resetStore";
-import { parseCliArgs, renderCliReport } from "../server/cliRender";
 import type { ConversationDetail, ConversationUsageSummary, DashboardSummaryPayload, DataSourceHealth, TelemetryFilterOptions, TelemetryProvider } from "../src/types/telemetry";
 
 /**
@@ -516,33 +515,5 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       fs.rmSync(outsideFile, { force: true });
     }
-  });
-});
-
-describe("CLI Parser & Renderer (server/cliRender.ts)", () => {
-  it("parses short/long CLI flags and renders an aligned terminal report", () => {
-    expect(parseCliArgs([])).toEqual({ json: false, limit: 10, help: false });
-    expect(
-      parseCliArgs(["-d", "14", "-w", "token", "-m", "Argon", "-n", "1", "--data-dir", "/tmp/ag", "--json"]),
-    ).toEqual({
-      days: 14,
-      workspace: "token",
-      model: "Argon",
-      limit: 1,
-      dataDir: "/tmp/ag",
-      json: true,
-      help: false,
-    });
-    expect(parseCliArgs(["--help"]).help).toBe(true);
-
-    const report = renderCliReport(createMockProviderFixture().provider.getSummary(), 1);
-    expect(report).toContain("/Users/demo/.gemini/antigravity");
-    expect(report).toContain("wal-readonly");
-    expect(report).toContain("2 conversations (1 subagents)");
-    expect(report).toContain("199,000");
-    expect(report).toContain("91.1%");
-    expect(report).toContain("Gemini 4 Argon (High)");
-    expect(report).toContain("[Top Conversations (1/2)]");
-    expect(report).not.toContain("Implement HTTP & CLI test suite");
   });
 });

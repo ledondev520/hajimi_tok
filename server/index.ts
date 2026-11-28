@@ -114,6 +114,14 @@ function startAgyQuotaSyncLoop(): () => void {
   return () => { clearTimeout(initTimer); clearInterval(pollTimer); };
 }
 
+/** 生产常驻启动时幂等补装 400K 压缩提醒 Hook（尊重用户卸载退订与 AGY_SKIP_COMPACT_HOOK=1） */
+function ensureCompactReminderHookOnBoot(): void {
+  if (!IS_CANONICAL_PROD_INSTANCE || process.env.AGY_SKIP_COMPACT_HOOK === "1") return;
+  const hookScript = path.join(REPO_ROOT, "scripts", "compact-reminder-hook.mjs");
+  if (!fs.existsSync(hookScript) || !fs.existsSync(path.join(os.homedir(), ".gemini"))) return;
+  execFile(process.execPath, [hookScript, "--auto-install"], { timeout: 5000 }, () => undefined);
+}
+
 function listenOptionalMirror(factory: () => Server, port: number, host: string): Server {
   const mirror = factory();
   mirror.on("error", () => { /* 无 IPv6 或被占用时静默忽略 */ });
@@ -142,6 +150,7 @@ function bootstrapServer(): void {
     servers.push(listenOptionalMirror(makeServer, PORT, "::1"));
   }
 
+  ensureCompactReminderHookOnBoot();
   const stopQuotaSync = startAgyQuotaSyncLoop();
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {

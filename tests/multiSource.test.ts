@@ -1,6 +1,6 @@
 /**
- * Input: vitest 断言工具、node:crypto/fs/http/os/path/sqlite 以及 server/{sources,multiSource,app,cliRender,protobuf}。
- * Output: 验证 T3 Code 多账号自动发现、多数据源合并/隔离聚合、HTTP /api/sources 与 ?source= 路由及 CLI --source 渲染。
+ * Input: vitest 断言工具、node:crypto/fs/http/os/path/sqlite 以及 server/{sources,multiSource,app,protobuf}。
+ * Output: 验证 T3 Code 多账号自动发现、多数据源合并/隔离聚合及 HTTP /api/sources 与 ?source= 路由。
  * Pos: 多账号与 T3 Code 兼容性自动化测试套件（tests/multiSource.test.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -13,7 +13,6 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryHttpServer } from "../server/app";
-import { parseCliArgs, renderCliReport } from "../server/cliRender";
 import { createMultiSourceTelemetryService } from "../server/multiSource";
 import { concatBytes, encodeBytesField, encodeStringField, encodeVarintField } from "../server/protobuf";
 import { discoverLocalDataSources, sanitizeSourceSlug } from "../server/sources";
@@ -321,14 +320,6 @@ describe("Multi-Source Service, HTTP API & CLI (server/multiSource.ts)", () => {
       await fetch(`${baseUrl}/api/calibrations?source=${encodeURIComponent("t3:acct_b")}`)
     ).json()) as { calibrations: Record<string, { remainingPct: number }> };
     expect(calBRes.calibrations[calKey]).toBeUndefined();
-
-    // 6. CLI --source 参数与 [By Account / Source] 多账号汇总表渲染
-    expect(parseCliArgs(["-s", "t3:acct_a", "--days", "7"]).source).toBe("t3:acct_a");
-    const report = renderCliReport(merged, 5);
-    expect(report).toContain("[By Account / Source]");
-    expect(report).toContain("Studio Alpha");
-    expect(report).toContain("Personal Beta");
-    expect(report).toContain("t3:acct_a");
   });
 
   it("applies shared-resets.json to merged and T3 accounts, isolates dismissal, and supports nodeLimit & ETag 304", async () => {

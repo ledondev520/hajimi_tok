@@ -198,6 +198,26 @@ async function bootoutAndVerify() {
   return { unloaded: !final.loaded, wasLoaded: true, error: bootoutErr };
 }
 
+/** 幂等自动注册 400K 压缩软提醒 Hook（尊重用户退订与 AGY_SKIP_COMPACT_HOOK=1，不阻塞服务启停） */
+function ensureCompactReminderHook() {
+  const compactHookScript = path.join(ROOT, "scripts", "compact-reminder-hook.mjs");
+  if (
+    process.env.AGY_SKIP_COMPACT_HOOK === "1" ||
+    !fs.existsSync(compactHookScript) ||
+    !fs.existsSync(path.join(os.homedir(), ".gemini"))
+  ) {
+    return;
+  }
+  try {
+    execFileSync(process.execPath, [compactHookScript, "--auto-install"], {
+      stdio: "inherit",
+      timeout: 5000,
+    });
+  } catch {
+    /* 压缩提醒 Hook 安装失败不影响常驻服务启动 */
+  }
+}
+
 /**
  * 职责：根据命令行动作执行常驻服务安装、重启、停止或状态探活。
  * 参数：action — 子命令名称（install | restart | stop | status）。
@@ -262,22 +282,8 @@ async function main(action) {
         /* 桥接安装失败不影响常驻服务启动 */
       }
     }
-    // 1.1.2. 若本机存在 ~/.gemini 目录且未显式跳过，自动无侵入注册 400K 上下文压缩软提醒 Hook
-    const compactHookScript = path.join(ROOT, "scripts", "compact-reminder-hook.mjs");
-    if (
-      process.env.AGY_SKIP_COMPACT_HOOK !== "1" &&
-      fs.existsSync(compactHookScript) &&
-      fs.existsSync(path.join(os.homedir(), ".gemini"))
-    ) {
-      try {
-        execFileSync(process.execPath, [compactHookScript, "--install"], {
-          stdio: "inherit",
-          timeout: 5000,
-        });
-      } catch {
-        /* 压缩提醒 Hook 安装失败不影响常驻服务启动 */
-      }
-    }
+    // 1.1.2. 若本机存在 ~/.gemini 目录且未退订，自动无侵入注册 400K 上下文压缩软提醒 Hook
+    ensureCompactReminderHook();
     return;
   }
 
@@ -289,6 +295,7 @@ async function main(action) {
     }
     execFileSync("launchctl", ["kickstart", "-k", SERVICE_TARGET], { stdio: "inherit" });
     await new Promise((r) => setTimeout(r, 600));
+    ensureCompactReminderHook();
     console.log(`✓ 已重启常驻服务 ${LABEL}`);
     return;
   }

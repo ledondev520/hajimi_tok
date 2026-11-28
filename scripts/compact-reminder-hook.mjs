@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_HOOKS_PATH = path.join(os.homedir(), ".gemini", "config", "hooks.json");
+const DEFAULT_OPT_OUT_PATH = path.join(os.homedir(), ".hamiji-sta", "compact-hook-disabled");
 
 export const HOOK_KEY = "context-compact-reminder"; // 注册到 hooks.json 的独立顶级键名
 export const REMIND_THRESHOLD_TOKENS = 400_000; // 触发软提醒的 Prompt Token 水位线（400K）
@@ -255,13 +256,22 @@ export function handleHookPayload(payload) {
 }
 
 /**
- * 职责：安全无侵入将本脚本注册为 Antigravity 全局 PreInvocation Hook（保留所有已有 Hook）。
- * 参数：options - 可选自定义 hooksPath 与 expectedCmd（供测试隔离）。
+ * 职责：安全无侵入将本脚本注册为 Antigravity 全局 PreInvocation + Stop Hook（保留所有已有 Hook）。
+ * 参数：options - 可选 hooksPath、expectedCmd、auto（自动推送模式尊重卸载退订标记）与 optOutPath（测试隔离用）。
  * 返回值：{ installed: boolean, reason: string }。
  */
 export function installCompactReminderHook(options = {}) {
   const hooksPath = options.hooksPath || DEFAULT_HOOKS_PATH;
   const expectedCmd = options.expectedCmd || `"${process.execPath}" "${SCRIPT_PATH}"`;
+  const optOutPath = options.optOutPath !== undefined
+    ? options.optOutPath
+    : options.hooksPath
+      ? null
+      : DEFAULT_OPT_OUT_PATH;
+
+  if (options.auto && (process.env.AGY_SKIP_COMPACT_HOOK === "1" || (optOutPath && fs.existsSync(optOutPath)))) {
+    return { installed: false, reason: "用户已主动关闭 400K 压缩提醒 Hook，跳过自动安装" };
+  }
 
   let hooks = {};
   if (fs.existsSync(hooksPath)) {
@@ -285,23 +295,34 @@ export function installCompactReminderHook(options = {}) {
     command: expectedCmd,
     timeout: 5,
   };
-  hooks[HOOK_KEY] = {
+  const nextEntry = {
     enabled: true,
     PreInvocation: [handler],
     Stop: [{ ...handler }],
   };
-  writeJsonAtomic(hooksPath, hooks);
+  if (JSON.stringify(hooks[HOOK_KEY]) !== JSON.stringify(nextEntry)) {
+    hooks[HOOK_KEY] = nextEntry;
+    writeJsonAtomic(hooksPath, hooks);
+  }
+  if (!options.auto && optOutPath && fs.existsSync(optOutPath)) {
+    try { fs.rmSync(optOutPath, { force: true }); } catch { /* ignore */ }
+  }
   return { installed: true, reason: `已注册 400K 上下文软提醒 Hook (${hooksPath})` };
 }
 
 /**
- * 职责：安全卸载本脚本在 hooks.json 中的条目，完整保留用户其他 Hook。
- * 参数：options - 可选自定义 hooksPath 与 expectedCmd（供测试隔离）。
+ * 职责：安全卸载本脚本在 hooks.json 中的条目，完整保留用户其他 Hook（并写入退订标记防止重启自动回装）。
+ * 参数：options - 可选自定义 hooksPath、expectedCmd 与 optOutPath（供测试隔离）。
  * 返回值：{ removed: boolean, reason: string }。
  */
 export function uninstallCompactReminderHook(options = {}) {
   const hooksPath = options.hooksPath || DEFAULT_HOOKS_PATH;
   const expectedCmd = options.expectedCmd || `"${process.execPath}" "${SCRIPT_PATH}"`;
+  const optOutPath = options.optOutPath !== undefined
+    ? options.optOutPath
+    : options.hooksPath
+      ? null
+      : DEFAULT_OPT_OUT_PATH;
 
   if (!fs.existsSync(hooksPath)) {
     return { removed: false, reason: `未找到配置文件 (${hooksPath})` };
@@ -326,6 +347,12 @@ export function uninstallCompactReminderHook(options = {}) {
 
   delete hooks[HOOK_KEY];
   writeJsonAtomic(hooksPath, hooks);
+  if (optOutPath) {
+    try {
+      fs.mkdirSync(path.dirname(optOutPath), { recursive: true });
+      fs.writeFileSync(optOutPath, `${new Date().toISOString()}\n`, "utf8");
+    } catch { /* ignore */ }
+  }
   return { removed: true, reason: `已卸载 ${HOOK_KEY} (${hooksPath})` };
 }
 
@@ -333,8 +360,8 @@ const isDirectRun =
   process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isDirectRun) {
-  if (process.argv.includes("--install")) {
-    const res = installCompactReminderHook();
+  if (process.argv.includes("--install") || process.argv.includes("--auto-install")) {
+    const res = installCompactReminderHook({ auto: process.argv.includes("--auto-install") });
     console.log(res.installed ? `✓ ${res.reason}` : `· ${res.reason}`);
   } else if (process.argv.includes("--uninstall")) {
     const res = uninstallCompactReminderHook();
