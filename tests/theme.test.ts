@@ -21,7 +21,7 @@ import { ensureDistinctColors, resolveModelStyle } from "../src/lib/modelStyle";
 describe("theme system & virtual CSS tokens", () => {
   it("normalizes theme mode and architectural presets with legacy migration", () => {
     expect(DEFAULT_THEME_MODE).toBe("system");
-    expect(DEFAULT_THEME_PRESET).toBe("mono");
+    expect(DEFAULT_THEME_PRESET).toBe("classic");
 
     expect(normalizeThemeMode("light")).toBe("light");
     expect(normalizeThemeMode("dark")).toBe("dark");
@@ -30,6 +30,7 @@ describe("theme system & virtual CSS tokens", () => {
     expect(normalizeThemeMode(null)).toBe(DEFAULT_THEME_MODE);
 
     expect(THEME_PRESETS.map((p) => p.id)).toEqual([
+      "classic",
       "mono",
       "tokyo",
       "claude",

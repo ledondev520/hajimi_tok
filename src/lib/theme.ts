@@ -1,6 +1,6 @@
 /**
  * Input: 浏览器 localStorage、matchMedia、document.documentElement 与 React 状态/副作用钩子。
- * Output: 导出主题模式与配色预设类型、6 套鲜明辨识度主题元数据（Vercel / Nebula / Claude / Nord / Terminal / Tokyo）、DOM 同步工具函数与 useThemeState 跨标签页同步钩子。
+ * Output: 导出主题模式与配色预设类型、经典原版（默认）+ 6 套鲜明辨识度主题元数据（Classic / Vercel / Tokyo / Claude / Nebula / Nord / HUD）、DOM 同步工具函数与 useThemeState 跨标签页同步钩子。
  * Pos: 前端主题系统核心状态与持久化引擎，为主看板与 /calendar 日历页提供统一外观模式（浅色/深色/跟随系统）与整站级主题切换能力（src/lib/theme.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -12,8 +12,15 @@ export type ThemeMode = "light" | "dark" | "system";
 /** 实际生效的明暗模式 */
 export type ResolvedThemeMode = "light" | "dark";
 
-/** 内置 6 套鲜明风格主题方案标识 */
-export type ThemePresetId = "mono" | "linear" | "claude" | "stripe" | "terminal" | "tokyo";
+/** 内置主题方案标识（classic 经典原版默认 + 6 套鲜明风格主题） */
+export type ThemePresetId =
+  | "classic"
+  | "mono"
+  | "linear"
+  | "claude"
+  | "stripe"
+  | "terminal"
+  | "tokyo";
 
 /** 单套主题配色的展示元数据（供主题面板渲染真实画布、圆角、卡片与图表四色谱预览） */
 export interface ThemePresetMeta {
@@ -37,10 +44,11 @@ export interface ThemePresetMeta {
 export const THEME_MODE_STORAGE_KEY = "agy_theme_mode"; // 外观明暗模式持久化键
 export const THEME_PRESET_STORAGE_KEY = "agy_theme_preset"; // 主题配色方案持久化键
 export const DEFAULT_THEME_MODE: ThemeMode = "system"; // 默认跟随操作系统浅色/深色偏好
-export const DEFAULT_THEME_PRESET: ThemePresetId = "mono"; // 默认极简黑白（Vercel / Geist 风格）
+export const DEFAULT_THEME_PRESET: ThemePresetId = "classic"; // 默认保留经典原版（Slate + Indigo 清爽配色）
 
 const VALID_MODES = new Set<ThemeMode>(["light", "dark", "system"]);
 const VALID_PRESETS = new Set<ThemePresetId>([
+  "classic",
   "mono",
   "linear",
   "claude",
@@ -59,8 +67,25 @@ const LEGACY_PRESET_MAP: Record<string, ThemePresetId> = {
   rose: "claude",
 };
 
-/** 6 套高辨识度整站级主题清单（画布氛围、卡片材质、圆角几何与图表色谱全量联动） */
+/** 经典原版（默认）+ 6 套高辨识度整站级主题清单（画布氛围、卡片材质、圆角几何与图表色谱全量联动） */
 export const THEME_PRESETS: readonly ThemePresetMeta[] = [
+  {
+    id: "classic",
+    name: "经典原版",
+    badge: "默认",
+    tagline: "原版 Slate 浅灰/深海蓝底色 · 靛蓝与翡翠经典配色 · 零纹理清爽直览",
+    radius: 12,
+    swatches: {
+      lightBg: "#f8fafc",
+      lightCard: "#ffffff",
+      darkBg: "#020617",
+      darkCard: "#0f172a",
+      accent: "#4f46e5",
+      accentDark: "#6366f1",
+      paletteLight: ["#6366f1", "#10b981", "#8b5cf6", "#f59e0b"],
+      paletteDark: ["#818cf8", "#34d399", "#a78bfa", "#fbbf24"],
+    },
+  },
   {
     id: "mono",
     name: "极简黑白",

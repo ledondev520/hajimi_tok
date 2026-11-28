@@ -1,5 +1,5 @@
 /**
- * Input: 无外部运行时依赖，纯函数生成 Tailwind v4 虚拟样式表与 6 套鲜明辨识度整站级主题（Vercel / Tokyo Night / Claude 暖陶 / Nebula 星云 / Nord 北欧 / Terminal HUD）的完整 CSS 令牌。
+ * Input: 无外部运行时依赖，纯函数生成 Tailwind v4 虚拟样式表与 经典原版（默认）+ 6 套鲜明辨识度整站级主题（Classic / Vercel / Tokyo Night / Claude 暖陶 / Nebula 星云 / Nord 北欧 / Terminal HUD）的完整 CSS 令牌。
  * Output: 导出 buildVirtualThemeCss()，供 vite.config.ts 注入至 virtual:tailwind.css。
  * Pos: 零物理 .css/.scss 约束下的全局视觉引擎：联动画布底色、氛围光晕/网格材质、卡片层级、几何圆角、控件高亮与 8 槽位图表色盘（src/lib/themeCss.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
@@ -19,9 +19,83 @@ export function buildVirtualThemeCss(): string {
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ==========================================================================
-   1. 极简黑白 (Vercel / Geist) — 纯净黑白高对比 + 工程点阵画布
+   0. 经典原版 (Classic / Default) — 忠实还原原版 Slate 浅灰/深海蓝 + 靛蓝翡翠配色
    ========================================================================== */
 :root,
+:root[data-theme="classic"] {
+  --theme-radius-card: 12px;
+  --theme-radius-control: 8px;
+  --theme-canvas: #f8fafc;
+  --theme-canvas-overlay: none;
+  --theme-canvas-overlay-size: auto;
+  --theme-surface: #ffffff;
+  --theme-surface-solid: #ffffff;
+  --theme-surface-elevated: #f1f5f9;
+  --theme-surface-muted: #f1f5f9;
+  --theme-surface-header: rgba(255, 255, 255, 0.94);
+  --theme-border: rgba(203, 213, 225, 0.85);
+  --theme-border-strong: rgba(148, 163, 184, 0.70);
+  --theme-text: #0f172a;
+  --theme-text-secondary: #334155;
+  --theme-text-muted: #64748b;
+  --theme-accent: #4f46e5;
+  --theme-accent-hover: #4338ca;
+  --theme-accent-soft: rgba(79, 70, 229, 0.10);
+  --theme-accent-border: rgba(99, 102, 241, 0.30);
+  --theme-accent-ink: #4338ca;
+  --theme-accent-contrast: #ffffff;
+  --theme-row-hover: rgba(15, 23, 42, 0.03);
+  --theme-grid-line: rgba(148, 163, 184, 0.22);
+  --theme-chart-axis: #64748b;
+  --theme-chart-1: #6366f1; --theme-chart-2: #10b981; --theme-chart-3: #8b5cf6; --theme-chart-4: #f59e0b;
+  --theme-chart-5: #0ea5e9; --theme-chart-6: #f43f5e; --theme-chart-7: #14b8a6; --theme-chart-8: #f97316;
+  --theme-chart-muted: #94a3b8;
+  --theme-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --theme-shadow-card-hover: 0 4px 12px -4px rgba(15, 23, 42, 0.09);
+  --theme-shadow-popover: 0 16px 36px -8px rgba(15, 23, 42, 0.16), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --theme-scrollbar-thumb: rgba(148, 163, 184, 0.38);
+  --theme-scrollbar-thumb-hover: rgba(100, 116, 139, 0.56);
+}
+
+.dark,
+.dark[data-theme="classic"] {
+  --theme-radius-card: 12px;
+  --theme-radius-control: 8px;
+  --theme-canvas: #020617;
+  --theme-canvas-overlay: none;
+  --theme-canvas-overlay-size: auto;
+  --theme-surface: #0f172a;
+  --theme-surface-solid: #0f172a;
+  --theme-surface-elevated: #1e293b;
+  --theme-surface-muted: #0b1220;
+  --theme-surface-header: rgba(2, 6, 23, 0.92);
+  --theme-border: rgba(30, 41, 59, 0.92);
+  --theme-border-strong: rgba(71, 85, 105, 0.85);
+  --theme-text: #f8fafc;
+  --theme-text-secondary: #cbd5e1;
+  --theme-text-muted: #94a3b8;
+  --theme-accent: #6366f1;
+  --theme-accent-hover: #818cf8;
+  --theme-accent-soft: rgba(99, 102, 241, 0.16);
+  --theme-accent-border: rgba(129, 140, 248, 0.36);
+  --theme-accent-ink: #a5b4fc;
+  --theme-accent-contrast: #ffffff;
+  --theme-row-hover: rgba(148, 163, 184, 0.07);
+  --theme-grid-line: rgba(148, 163, 184, 0.13);
+  --theme-chart-axis: #94a3b8;
+  --theme-chart-1: #818cf8; --theme-chart-2: #34d399; --theme-chart-3: #a78bfa; --theme-chart-4: #fbbf24;
+  --theme-chart-5: #38bdf8; --theme-chart-6: #fb7185; --theme-chart-7: #2dd4bf; --theme-chart-8: #fb923c;
+  --theme-chart-muted: #64748b;
+  --theme-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --theme-shadow-card-hover: 0 4px 14px -4px rgba(0, 0, 0, 0.50);
+  --theme-shadow-popover: 0 20px 46px -10px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(148, 163, 184, 0.12);
+  --theme-scrollbar-thumb: rgba(148, 163, 184, 0.25);
+  --theme-scrollbar-thumb-hover: rgba(148, 163, 184, 0.44);
+}
+
+/* ==========================================================================
+   1. 极简黑白 (Vercel / Geist) — 纯净黑白高对比 + 工程点阵画布
+   ========================================================================== */
 :root[data-theme="mono"] {
   --theme-radius-card: 12px;
   --theme-radius-control: 8px;
@@ -47,14 +121,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(24, 24, 27, 0.035);
   --theme-grid-line: rgba(24, 24, 27, 0.075);
   --theme-chart-axis: #71717a;
-  --theme-chart-1: #18181b;
-  --theme-chart-2: #2563eb;
-  --theme-chart-3: #059669;
-  --theme-chart-4: #d97706;
-  --theme-chart-5: #e11d48;
-  --theme-chart-6: #0891b2;
-  --theme-chart-7: #7c3aed;
-  --theme-chart-8: #ea580c;
+  --theme-chart-1: #18181b; --theme-chart-2: #2563eb; --theme-chart-3: #059669; --theme-chart-4: #d97706;
+  --theme-chart-5: #e11d48; --theme-chart-6: #0891b2; --theme-chart-7: #7c3aed; --theme-chart-8: #ea580c;
   --theme-chart-muted: #71717a;
   --theme-shadow-card: 0 1px 2px rgba(9, 9, 11, 0.05);
   --theme-shadow-card-hover: 0 4px 12px -4px rgba(9, 9, 11, 0.10), 0 1px 2px rgba(9, 9, 11, 0.05);
@@ -63,7 +131,6 @@ export function buildVirtualThemeCss(): string {
   --theme-scrollbar-thumb-hover: rgba(24, 24, 27, 0.48);
 }
 
-.dark,
 .dark[data-theme="mono"] {
   --theme-radius-card: 12px;
   --theme-radius-control: 8px;
@@ -89,14 +156,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(255, 255, 255, 0.04);
   --theme-grid-line: rgba(255, 255, 255, 0.07);
   --theme-chart-axis: #7a7a85;
-  --theme-chart-1: #e4e4e7;
-  --theme-chart-2: #3b82f6;
-  --theme-chart-3: #10b981;
-  --theme-chart-4: #f59e0b;
-  --theme-chart-5: #f43f5e;
-  --theme-chart-6: #22d3ee;
-  --theme-chart-7: #a78bfa;
-  --theme-chart-8: #fb923c;
+  --theme-chart-1: #e4e4e7; --theme-chart-2: #3b82f6; --theme-chart-3: #10b981; --theme-chart-4: #f59e0b;
+  --theme-chart-5: #f43f5e; --theme-chart-6: #22d3ee; --theme-chart-7: #a78bfa; --theme-chart-8: #fb923c;
   --theme-chart-muted: #71717a;
   --theme-shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.09);
@@ -133,14 +194,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(46, 125, 233, 0.06);
   --theme-grid-line: rgba(46, 125, 233, 0.10);
   --theme-chart-axis: #5d6e96;
-  --theme-chart-1: #2e7de9;
-  --theme-chart-2: #587539;
-  --theme-chart-3: #7847bd;
-  --theme-chart-4: #b15c00;
-  --theme-chart-5: #f52a65;
-  --theme-chart-6: #007197;
-  --theme-chart-7: #387068;
-  --theme-chart-8: #8c6c3e;
+  --theme-chart-1: #2e7de9; --theme-chart-2: #587539; --theme-chart-3: #7847bd; --theme-chart-4: #b15c00;
+  --theme-chart-5: #f52a65; --theme-chart-6: #007197; --theme-chart-7: #387068; --theme-chart-8: #8c6c3e;
   --theme-chart-muted: #6e7fa8;
   --theme-shadow-card: 0 2px 6px -2px rgba(26, 35, 64, 0.07);
   --theme-shadow-card-hover: 0 6px 16px -6px rgba(46, 125, 233, 0.18);
@@ -172,14 +227,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(122, 162, 247, 0.09);
   --theme-grid-line: rgba(122, 162, 247, 0.11);
   --theme-chart-axis: #737aa2;
-  --theme-chart-1: #7aa2f7;
-  --theme-chart-2: #9ece6a;
-  --theme-chart-3: #bb9af7;
-  --theme-chart-4: #e0af68;
-  --theme-chart-5: #f7768e;
-  --theme-chart-6: #7dcfff;
-  --theme-chart-7: #73daca;
-  --theme-chart-8: #ff9e64;
+  --theme-chart-1: #7aa2f7; --theme-chart-2: #9ece6a; --theme-chart-3: #bb9af7; --theme-chart-4: #e0af68;
+  --theme-chart-5: #f7768e; --theme-chart-6: #7dcfff; --theme-chart-7: #73daca; --theme-chart-8: #ff9e64;
   --theme-chart-muted: #565f89;
   --theme-shadow-card: inset 0 1px 0 rgba(192, 202, 245, 0.08), 0 4px 16px -6px rgba(9, 10, 18, 0.45);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(125, 207, 255, 0.18), 0 8px 22px -8px rgba(9, 10, 18, 0.55);
@@ -214,14 +263,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(201, 100, 66, 0.065);
   --theme-grid-line: rgba(110, 78, 52, 0.10);
   --theme-chart-axis: #827162;
-  --theme-chart-1: #c96442;
-  --theme-chart-2: #3d7a5e;
-  --theme-chart-3: #c48b1c;
-  --theme-chart-4: #b55470;
-  --theme-chart-5: #45739c;
-  --theme-chart-6: #d4752c;
-  --theme-chart-7: #7a6299;
-  --theme-chart-8: #6d7c46;
+  --theme-chart-1: #c96442; --theme-chart-2: #3d7a5e; --theme-chart-3: #c48b1c; --theme-chart-4: #b55470;
+  --theme-chart-5: #45739c; --theme-chart-6: #d4752c; --theme-chart-7: #7a6299; --theme-chart-8: #6d7c46;
   --theme-chart-muted: #938273;
   --theme-shadow-card: 0 2px 8px -3px rgba(62, 42, 24, 0.08);
   --theme-shadow-card-hover: 0 6px 18px -6px rgba(158, 82, 48, 0.16);
@@ -253,14 +296,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(227, 130, 95, 0.09);
   --theme-grid-line: rgba(242, 206, 178, 0.09);
   --theme-chart-axis: #a69484;
-  --theme-chart-1: #e3825f;
-  --theme-chart-2: #81b29a;
-  --theme-chart-3: #e9c46a;
-  --theme-chart-4: #d98ca3;
-  --theme-chart-5: #7ca5c8;
-  --theme-chart-6: #f4a261;
-  --theme-chart-7: #b59cd6;
-  --theme-chart-8: #a9b879;
+  --theme-chart-1: #e3825f; --theme-chart-2: #81b29a; --theme-chart-3: #e9c46a; --theme-chart-4: #d98ca3;
+  --theme-chart-5: #7ca5c8; --theme-chart-6: #f4a261; --theme-chart-7: #b59cd6; --theme-chart-8: #a9b879;
   --theme-chart-muted: #8a7a6c;
   --theme-shadow-card: inset 0 1px 0 rgba(255, 232, 212, 0.07), 0 4px 16px -6px rgba(10, 6, 4, 0.45);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(227, 130, 95, 0.18), 0 8px 22px -8px rgba(10, 6, 4, 0.55);
@@ -295,14 +332,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(124, 58, 237, 0.06);
   --theme-grid-line: rgba(124, 58, 237, 0.10);
   --theme-chart-axis: #706399;
-  --theme-chart-1: #7c3aed;
-  --theme-chart-2: #059669;
-  --theme-chart-3: #db2777;
-  --theme-chart-4: #2563eb;
-  --theme-chart-5: #d97706;
-  --theme-chart-6: #0891b2;
-  --theme-chart-7: #9333ea;
-  --theme-chart-8: #e11d48;
+  --theme-chart-1: #7c3aed; --theme-chart-2: #059669; --theme-chart-3: #db2777; --theme-chart-4: #2563eb;
+  --theme-chart-5: #d97706; --theme-chart-6: #0891b2; --theme-chart-7: #9333ea; --theme-chart-8: #e11d48;
   --theme-chart-muted: #7f73a3;
   --theme-shadow-card: 0 2px 8px -3px rgba(67, 55, 106, 0.09);
   --theme-shadow-card-hover: 0 6px 18px -6px rgba(124, 58, 237, 0.20);
@@ -334,14 +365,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(167, 139, 250, 0.10);
   --theme-grid-line: rgba(167, 139, 250, 0.11);
   --theme-chart-axis: #8f84ba;
-  --theme-chart-1: #a78bfa;
-  --theme-chart-2: #34d399;
-  --theme-chart-3: #f472b6;
-  --theme-chart-4: #60a5fa;
-  --theme-chart-5: #fbbf24;
-  --theme-chart-6: #22d3ee;
-  --theme-chart-7: #c084fc;
-  --theme-chart-8: #fb7185;
+  --theme-chart-1: #a78bfa; --theme-chart-2: #34d399; --theme-chart-3: #f472b6; --theme-chart-4: #60a5fa;
+  --theme-chart-5: #fbbf24; --theme-chart-6: #22d3ee; --theme-chart-7: #c084fc; --theme-chart-8: #fb7185;
   --theme-chart-muted: #786ea1;
   --theme-shadow-card: inset 0 1px 0 rgba(196, 181, 253, 0.10), 0 6px 20px -8px rgba(7, 4, 18, 0.55);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(196, 181, 253, 0.22), 0 10px 26px -8px rgba(7, 4, 18, 0.65);
@@ -376,14 +401,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(59, 126, 161, 0.065);
   --theme-grid-line: rgba(59, 126, 161, 0.11);
   --theme-chart-axis: #616e85;
-  --theme-chart-1: #2f7d99;
-  --theme-chart-2: #557a46;
-  --theme-chart-3: #84567d;
-  --theme-chart-4: #c28629;
-  --theme-chart-5: #b54550;
-  --theme-chart-6: #4b6f94;
-  --theme-chart-7: #3f8a7c;
-  --theme-chart-8: #b8663d;
+  --theme-chart-1: #2f7d99; --theme-chart-2: #557a46; --theme-chart-3: #84567d; --theme-chart-4: #c28629;
+  --theme-chart-5: #b54550; --theme-chart-6: #4b6f94; --theme-chart-7: #3f8a7c; --theme-chart-8: #b8663d;
   --theme-chart-muted: #707d94;
   --theme-shadow-card: 0 2px 6px -2px rgba(46, 52, 64, 0.08);
   --theme-shadow-card-hover: 0 6px 16px -6px rgba(59, 126, 161, 0.18);
@@ -415,14 +434,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(136, 192, 208, 0.09);
   --theme-grid-line: rgba(216, 222, 233, 0.10);
   --theme-chart-axis: #93a1b8;
-  --theme-chart-1: #88c0d0;
-  --theme-chart-2: #a3be8c;
-  --theme-chart-3: #b48ead;
-  --theme-chart-4: #ebcb8b;
-  --theme-chart-5: #bf616a;
-  --theme-chart-6: #81a1c1;
-  --theme-chart-7: #8fbcbb;
-  --theme-chart-8: #d08770;
+  --theme-chart-1: #88c0d0; --theme-chart-2: #a3be8c; --theme-chart-3: #b48ead; --theme-chart-4: #ebcb8b;
+  --theme-chart-5: #bf616a; --theme-chart-6: #81a1c1; --theme-chart-7: #8fbcbb; --theme-chart-8: #d08770;
   --theme-chart-muted: #6e7b91;
   --theme-shadow-card: inset 0 1px 0 rgba(236, 239, 244, 0.08), 0 4px 14px -6px rgba(15, 19, 26, 0.45);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(136, 192, 208, 0.20), 0 8px 20px -8px rgba(15, 19, 26, 0.55);
@@ -457,14 +470,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(5, 150, 105, 0.07);
   --theme-grid-line: rgba(5, 150, 105, 0.12);
   --theme-chart-axis: #467865;
-  --theme-chart-1: #059669;
-  --theme-chart-2: #0891b2;
-  --theme-chart-3: #65a30d;
-  --theme-chart-4: #d97706;
-  --theme-chart-5: #e11d48;
-  --theme-chart-6: #0284c7;
-  --theme-chart-7: #0d9488;
-  --theme-chart-8: #ca8a04;
+  --theme-chart-1: #059669; --theme-chart-2: #0891b2; --theme-chart-3: #65a30d; --theme-chart-4: #d97706;
+  --theme-chart-5: #e11d48; --theme-chart-6: #0284c7; --theme-chart-7: #0d9488; --theme-chart-8: #ca8a04;
   --theme-chart-muted: #5b8575;
   --theme-shadow-card: 0 1px 0 rgba(5, 150, 105, 0.12);
   --theme-shadow-card-hover: 0 0 0 1px rgba(5, 150, 105, 0.35);
@@ -496,14 +503,8 @@ export function buildVirtualThemeCss(): string {
   --theme-row-hover: rgba(52, 211, 153, 0.10);
   --theme-grid-line: rgba(52, 211, 153, 0.11);
   --theme-chart-axis: #5ca68b;
-  --theme-chart-1: #34d399;
-  --theme-chart-2: #22d3ee;
-  --theme-chart-3: #a3e635;
-  --theme-chart-4: #fbbf24;
-  --theme-chart-5: #fb7185;
-  --theme-chart-6: #38bdf8;
-  --theme-chart-7: #2dd4bf;
-  --theme-chart-8: #fde047;
+  --theme-chart-1: #34d399; --theme-chart-2: #22d3ee; --theme-chart-3: #a3e635; --theme-chart-4: #fbbf24;
+  --theme-chart-5: #fb7185; --theme-chart-6: #38bdf8; --theme-chart-7: #2dd4bf; --theme-chart-8: #fde047;
   --theme-chart-muted: #467865;
   --theme-shadow-card: inset 0 1px 0 rgba(52, 211, 153, 0.14), 0 0 24px -12px rgba(16, 185, 129, 0.35);
   --theme-shadow-card-hover: inset 0 1px 0 rgba(110, 231, 183, 0.28), 0 0 28px -10px rgba(52, 211, 153, 0.45);

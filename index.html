@@ -8,7 +8,7 @@
     <script>
       try {
         var mode = localStorage.getItem("agy_theme_mode") || "system";
-        var rawPreset = localStorage.getItem("agy_theme_preset") || "mono";
+        var rawPreset = localStorage.getItem("agy_theme_preset") || "classic";
         var legacyMap = {
           indigo: "linear",
           ocean: "tokyo",
@@ -17,8 +17,8 @@
           amber: "claude",
           rose: "claude"
         };
-        var validPresets = { mono: 1, linear: 1, claude: 1, stripe: 1, terminal: 1, tokyo: 1 };
-        var preset = validPresets[rawPreset] ? rawPreset : (legacyMap[rawPreset] || "mono");
+        var validPresets = { classic: 1, mono: 1, linear: 1, claude: 1, stripe: 1, terminal: 1, tokyo: 1 };
+        var preset = validPresets[rawPreset] ? rawPreset : (legacyMap[rawPreset] || "classic");
         var isDark =
           mode === "dark" ||
           (mode !== "light" &&

@@ -170,7 +170,7 @@ export function ThemeSwitcher({ theme }: ThemeSwitcherProps) {
             </div>
           </div>
 
-          {/* 1.3. 6 套鲜明辨识度主题缩略图卡片（真实画布 + 圆角 + 4 色迷你柱图） */}
+          {/* 1.3. 经典原版（默认通栏）+ 6 套鲜明风格主题 2x3 缩略图卡片 */}
           <div className="space-y-2">
             <div className="text-[11px] font-medium text-[var(--theme-text-muted)]">
               风格预设
@@ -178,6 +178,7 @@ export function ThemeSwitcher({ theme }: ThemeSwitcherProps) {
             <div className="grid grid-cols-2 gap-2.5">
               {THEME_PRESETS.map((item) => {
                 const selected = theme.preset === item.id;
+                const isClassic = item.id === "classic";
                 const previewBg = isDark ? item.swatches.darkBg : item.swatches.lightBg;
                 const previewCard = isDark ? item.swatches.darkCard : item.swatches.lightCard;
                 const previewAccent = isDark ? item.swatches.accentDark : item.swatches.accent;
@@ -188,6 +189,98 @@ export function ThemeSwitcher({ theme }: ThemeSwitcherProps) {
                   ? "rgba(255,255,255,0.14)"
                   : "rgba(15,23,42,0.12)";
                 const miniRadius = Math.max(3, Math.round(item.radius * 0.45));
+                const previewOverlay = isClassic
+                  ? "none"
+                  : item.id === "terminal"
+                    ? `linear-gradient(${previewAccent}22 1px, transparent 1px), linear-gradient(90deg, ${previewAccent}22 1px, transparent 1px)`
+                    : `radial-gradient(ellipse 90% 60% at 50% 0%, ${previewAccent}33, transparent 72%)`;
+
+                if (isClassic) {
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => theme.setPreset(item.id)}
+                      className={`group col-span-2 flex cursor-pointer items-center gap-3 rounded-xl border p-2.5 text-left transition-all ${
+                        selected
+                          ? "border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] ring-1 ring-[var(--theme-accent)]"
+                          : "border-[var(--theme-border)] bg-[var(--theme-surface)] hover:border-[var(--theme-border-strong)]"
+                      }`}
+                    >
+                      <div
+                        className="flex h-12 w-24 shrink-0 flex-col justify-between border p-1.5"
+                        style={{
+                          backgroundColor: previewBg,
+                          borderColor: previewBorder,
+                          borderRadius: `${miniRadius}px`,
+                        }}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span
+                            className="h-1.5 w-6 rounded-full"
+                            style={{ backgroundColor: previewAccent }}
+                          />
+                          <span className="flex items-center gap-0.5">
+                            {previewPalette.map((c, cIdx) => (
+                              <span
+                                key={cIdx}
+                                className="size-1.5 rounded-full"
+                                style={{ backgroundColor: c }}
+                              />
+                            ))}
+                          </span>
+                        </div>
+                        <div
+                          className="flex h-5 items-end gap-1 border px-1.5 pb-0.5"
+                          style={{
+                            backgroundColor: previewCard,
+                            borderColor: previewBorder,
+                            borderRadius: `${Math.max(2, miniRadius - 2)}px`,
+                          }}
+                        >
+                          {[60, 92, 52, 78].map((hPct, bIdx) => (
+                            <span
+                              key={bIdx}
+                              className="flex-1 rounded-t-[2px]"
+                              style={{
+                                height: `${hPct}%`,
+                                backgroundColor: previewPalette[bIdx],
+                              }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="min-w-0 flex-1 space-y-0.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-semibold text-[var(--theme-text)]">
+                              {item.name}
+                            </span>
+                            <span className="rounded border border-[var(--theme-border)] bg-[var(--theme-surface-elevated)] px-1.5 py-0 text-[9.5px] font-medium text-[var(--theme-text-muted)]">
+                              {item.badge}
+                            </span>
+                          </div>
+                          {selected && (
+                            <span
+                              className="flex size-4 shrink-0 items-center justify-center rounded-full"
+                              style={{
+                                backgroundColor: previewAccent,
+                                color: "#ffffff",
+                              }}
+                            >
+                              <Check className="size-2.5 stroke-[2.8]" />
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate text-[10px] text-[var(--theme-text-muted)]">
+                          {item.tagline}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                }
 
                 return (
                   <button
@@ -208,10 +301,7 @@ export function ThemeSwitcher({ theme }: ThemeSwitcherProps) {
                         backgroundColor: previewBg,
                         borderColor: previewBorder,
                         borderRadius: `${miniRadius}px`,
-                        backgroundImage:
-                          item.id === "terminal"
-                            ? `linear-gradient(${previewAccent}22 1px, transparent 1px), linear-gradient(90deg, ${previewAccent}22 1px, transparent 1px)`
-                            : `radial-gradient(ellipse 90% 60% at 50% 0%, ${previewAccent}33, transparent 72%)`,
+                        backgroundImage: previewOverlay,
                         backgroundSize: item.id === "terminal" ? "10px 10px" : "100% 100%",
                       }}
                     >
