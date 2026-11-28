@@ -1,7 +1,7 @@
 /**
  * Input: node:crypto、node:fs、node:os、node:path 与 ../src/types/telemetry 的 DataSourceKind 类型。
- * Output: 导出 discoverLocalDataSources() 自动发现本机原生 Antigravity 与 T3 Code 多账号数据目录。
- * Pos: 本地多数据源发现层（零硬编码个人路径，自动兼容原生 ~/.gemini/antigravity 与 T3 Code 多实例）。
+ * Output: 导出 discoverLocalDataSources() 自动发现本机原生 Antigravity（含 antigravity-cli）与 T3 Code 多账号数据目录，按同 Google 账号无侵入自动归并并绑定官方 live-quota.json。
+ * Pos: 本地多数据源发现与同账号归并层（零硬编码个人路径、零凭证读取，自动兼容原生 ~/.gemini 与 T3 Code 多实例）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import crypto from "node:crypto";
@@ -15,8 +15,12 @@ export interface DiscoveredDataSource {
   id: string; // 唯一源 ID（native / t3:<instance> / custom）
   label: string; // 界面可读名称
   kind: DataSourceKind; // 数据源分类
-  dataDir: string; // AntiGravity 数据目录绝对路径
+  dataDir: string; // AntiGravity 主数据目录绝对路径
+  extraDataDirs?: string[]; // 按同 Google 账号自动归并进来的额外本地数据目录（如原生 App / CLI）
   stateDir?: string; // 该数据源独立状态目录（用于隔离周校准与重置记录）
+  liveQuotaPath?: string; // 明确绑定的官方 live-quota.json 路径（仅绑给与 agy 钥匙串同账号的源，绝不串号）
+  accountEmail?: string; // 内部归并用的小写账号邮箱（仅服务端本地匹配，不暴露前端）
+  mergedKinds?: DataSourceKind[]; // 归并包含的客户端类型列表（如 ["t3", "native"]）
 }
 
 /** 自动发现可选覆盖参数（主要供单元测试隔离宿主机路径） */
@@ -27,6 +31,10 @@ export interface DiscoverSourcesOptions {
   stateRootDir?: string; // 覆盖 ~/.hamiji-sta
 }
 
+const LOG_HEAD_READ_BYTES = 32 * 1024; // 仅读启动日志前 32KB 提取非敏感 applyAuthResult 邮箱
+const AUTH_EMAIL_RE = /applyAuthResult:\s*email=([^\s,]+@[^\s,]+)/i;
+const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * 职责：将任意源 ID 清洗为安全的文件系统目录名，防止路径穿越或非法字符。
  * 参数：rawId — 原始数据源 ID。
@@ -35,6 +43,118 @@ export interface DiscoverSourcesOptions {
 export function sanitizeSourceSlug(rawId: string): string {
   const cleaned = rawId.replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
   return cleaned || "source";
+}
+
+/** 归一化合法邮箱字符串 */
+function normalizeEmail(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const cleaned = raw.trim().toLowerCase();
+  return SIMPLE_EMAIL_RE.test(cleaned) ? cleaned : undefined;
+}
+
+/** 仅读取单个普通 .log 文件前 32KB 并匹配启动认证日志中的账号邮箱（绝不碰任何凭证/token 文件） */
+function readEmailFromLogHead(filePath: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const buf = Buffer.alloc(LOG_HEAD_READ_BYTES);
+    const bytesRead = fs.readSync(fd, buf, 0, LOG_HEAD_READ_BYTES, 0);
+    if (bytesRead <= 0) return undefined;
+    const text = buf.subarray(0, bytesRead).toString("utf8");
+    const m = text.match(AUTH_EMAIL_RE);
+    return m ? normalizeEmail(m[1]) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* 忽略关闭异常 */
+      }
+    }
+  }
+}
+
+/**
+ * 职责：从候选数据目录的普通启动日志（cli.log / log/*.log）只读推断归属 Google 账号邮箱。
+ * 思路：抽样最新最多 20 份日志做多数投票（平票取最新），避免单次 CLI/升级串号日志覆盖账号真实归属。
+ * 参数：dirs — 按优先级排列的数据目录列表。
+ * 返回值：规范化小写邮箱，无法推断时返回 undefined。
+ */
+export function detectAccountEmailFromLogs(dirs: string[]): string | undefined {
+  for (const dir of dirs) {
+    if (!dir || !fs.existsSync(dir)) continue;
+    const directCliLog = path.join(dir, "cli.log");
+    if (fs.existsSync(directCliLog)) {
+      const hit = readEmailFromLogHead(directCliLog);
+      if (hit) return hit;
+    }
+    const logDir = path.join(dir, "log");
+    if (!fs.existsSync(logDir)) continue;
+    try {
+      const files = fs
+        .readdirSync(logDir)
+        .filter((name) => name.endsWith(".log"))
+        .sort((a, b) => b.localeCompare(a))
+        .slice(0, 20);
+      const counts = new Map<string, { count: number; firstIndex: number }>();
+      for (let i = 0; i < files.length; i += 1) {
+        const hit = readEmailFromLogHead(path.join(logDir, files[i]));
+        if (!hit) continue;
+        const cur = counts.get(hit);
+        if (cur) cur.count += 1;
+        else counts.set(hit, { count: 1, firstIndex: i });
+      }
+      if (counts.size > 0) {
+        let winner = "";
+        let bestCount = -1;
+        let bestFirst = Infinity;
+        for (const [email, stat] of counts.entries()) {
+          if (stat.count > bestCount || (stat.count === bestCount && stat.firstIndex < bestFirst)) {
+            winner = email;
+            bestCount = stat.count;
+            bestFirst = stat.firstIndex;
+          }
+        }
+        if (winner) return winner;
+      }
+    } catch {
+      /* 忽略无权限日志目录 */
+    }
+  }
+  return undefined;
+}
+
+/** 从 live-quota.json 读取由 agy 官方 statusLine 写入的登录邮箱 */
+function readLiveQuotaAccountEmail(liveQuotaPath: string): string | undefined {
+  if (!liveQuotaPath || !fs.existsSync(liveQuotaPath)) return undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(liveQuotaPath, "utf8")) as { accountEmail?: unknown };
+    return normalizeEmail(parsed?.accountEmail);
+  } catch {
+    return undefined;
+  }
+}
+
+/** 将额外目录与端类型合并进目标主数据源，自动去重 */
+function mergeIntoSource(
+  target: DiscoveredDataSource,
+  dirs: string[],
+  kind: DataSourceKind
+): void {
+  const existingDirs = new Set([target.dataDir, ...(target.extraDataDirs ?? [])]);
+  const extras = [...(target.extraDataDirs ?? [])];
+  for (const d of dirs) {
+    if (d && !existingDirs.has(d)) {
+      existingDirs.add(d);
+      extras.push(d);
+    }
+  }
+  if (extras.length > 0) target.extraDataDirs = extras;
+  const kinds = new Set<DataSourceKind>(target.mergedKinds ?? [target.kind]);
+  kinds.add(kind);
+  if (kinds.size > 1) target.mergedKinds = [...kinds];
 }
 
 /**
@@ -105,7 +225,7 @@ function readT3ProviderLabels(
 }
 
 /**
- * 职责：按优先级发现本机全部 AntiGravity 遥测数据目录（显式 AGY_DATA_DIR 优先，否则自动扫描 T3 Code 与原生目录）。
+ * 职责：按优先级发现本机全部 AntiGravity 遥测数据目录，并自动将同一 Google 账号的 T3 与原生目录归并为统一账号视图。
  * 参数：options — 可选自定义目录与测试覆盖路径。
  * 返回值：至少包含 1 个元素的 DiscoveredDataSource 数组。
  */
@@ -117,6 +237,9 @@ export function discoverLocalDataSources(
     options.stateRootDir ||
     process.env.AGY_STATE_DIR?.trim() ||
     path.join(homeDir, ".hamiji-sta");
+  const rootLiveQuotaPath = options.stateRootDir
+    ? path.join(stateRoot, "live-quota.json")
+    : process.env.AGY_LIVE_QUOTA_FILE?.trim() || path.join(stateRoot, "live-quota.json");
 
   // 0. 显式传入 customDataDir 或环境变量 AGY_DATA_DIR 时严格按指定路径运行（支持 path.delimiter 多路径）
   const explicitRaw = (options.customDataDir ?? process.env.AGY_DATA_DIR ?? "").trim();
@@ -152,14 +275,14 @@ export function discoverLocalDataSources(
     });
   }
 
-  // 1. 扫描 T3 Code 多账号隔离目录（~/.t3/userdata/providers/antigravity/<hash>/antigravity-acp）
+  // 1. 扫描 T3 Code 多账号隔离目录（用户显式配置的各 T3 实例互不合并，保留独立身份与历史记录）
   const t3Root =
     options.t3UserdataDir ||
     process.env.T3_USERDATA_DIR?.trim() ||
     path.join(homeDir, ".t3", "userdata");
   const t3ProvidersDir = path.join(t3Root, "providers", "antigravity");
   const labelMap = readT3ProviderLabels(t3Root);
-  const t3Sources: DiscoveredDataSource[] = [];
+  const results: DiscoveredDataSource[] = [];
 
   if (fs.existsSync(t3ProvidersDir)) {
     try {
@@ -174,12 +297,15 @@ export function discoverLocalDataSources(
         const instanceKey = meta?.instanceKey || ent.name.slice(0, 8);
         const id = `t3:${instanceKey}`;
         const label = meta?.label || `T3 (${ent.name.slice(0, 8)})`;
-        t3Sources.push({
+        const accountEmail = detectAccountEmailFromLogs([acpDir]);
+
+        results.push({
           id,
           label,
           kind: "t3",
           dataDir: acpDir,
           stateDir: path.join(stateRoot, "sources", sanitizeSourceSlug(id)),
+          ...(accountEmail ? { accountEmail } : {}),
         });
       }
     } catch {
@@ -187,17 +313,51 @@ export function discoverLocalDataSources(
     }
   }
 
-  // 2. 检查原生 ~/.gemini/antigravity 目录（存在数据或无 T3 实例时保留）
-  const nativeDir = path.join(homeDir, ".gemini", "antigravity");
-  const results: DiscoveredDataSource[] = [...t3Sources];
-  if (t3Sources.length === 0 || hasTelemetryArtifacts(nativeDir)) {
-    results.push({
-      id: "native",
-      label: "原生 Antigravity",
-      kind: "native",
-      dataDir: nativeDir,
-      ...(options.stateRootDir ? { stateDir: stateRoot } : {}),
-    });
+  // 2. 扫描原生 ~/.gemini/antigravity 与 ~/.gemini/antigravity-cli，仅在唯一匹配某个 T3 账号邮箱时自动合并
+  const nativeAppDir = path.join(homeDir, ".gemini", "antigravity");
+  const nativeCliDir = path.join(homeDir, ".gemini", "antigravity-cli");
+  const liveQuotaEmail =
+    readLiveQuotaAccountEmail(rootLiveQuotaPath) ?? detectAccountEmailFromLogs([nativeCliDir]);
+  const nativeEmail = detectAccountEmailFromLogs([nativeCliDir, nativeAppDir]) ?? liveQuotaEmail;
+
+  const nativeDirs: string[] = [];
+  if (results.length === 0 || hasTelemetryArtifacts(nativeAppDir)) {
+    nativeDirs.push(nativeAppDir);
+  }
+  if (hasTelemetryArtifacts(nativeCliDir)) {
+    nativeDirs.push(nativeCliDir);
+  }
+
+  if (nativeDirs.length > 0) {
+    const matchedT3List = nativeEmail
+      ? results.filter((r) => r.kind === "t3" && r.accountEmail === nativeEmail)
+      : [];
+    if (matchedT3List.length === 1) {
+      mergeIntoSource(matchedT3List[0], nativeDirs, "native");
+    } else {
+      results.push({
+        id: "native",
+        label: "原生 Antigravity",
+        kind: "native",
+        dataDir: nativeDirs[0],
+        ...(nativeDirs.length > 1 ? { extraDataDirs: nativeDirs.slice(1) } : {}),
+        ...(options.stateRootDir ? { stateDir: stateRoot } : {}),
+        ...(nativeEmail ? { accountEmail: nativeEmail } : {}),
+      });
+    }
+  }
+
+  // 3. 精准绑定官方 agy live-quota.json：仅在唯一匹配到归属账号时绑定，多实例歧义或异号绝不串号
+  if (liveQuotaEmail) {
+    const owners = results.filter((r) => r.accountEmail === liveQuotaEmail);
+    if (owners.length === 1) {
+      owners[0].liveQuotaPath = rootLiveQuotaPath;
+    }
+  } else {
+    const nativeOnly = results.find((r) => r.kind === "native");
+    if (nativeOnly && !nativeOnly.liveQuotaPath) {
+      nativeOnly.liveQuotaPath = rootLiveQuotaPath;
+    }
   }
 
   return results;

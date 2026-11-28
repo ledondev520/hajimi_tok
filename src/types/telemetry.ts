@@ -270,6 +270,14 @@ export interface QuotaCycleInfo {
 /** 本地数据源类型（原生 Antigravity / T3 Code 隔离账号实例 / 自定义目录） */
 export type DataSourceKind = "native" | "t3" | "custom";
 
+/** 单账号下单个配额池的 7d 周剩余摘要（供顶部多账号卡片直接展示） */
+export interface SourcePoolQuotaBadge {
+  remainingPct: number; // 周剩余百分比（0 ~ 100，精确到 0.1）
+  source: "live" | "calibrated"; // live: agy 官方实时同步；calibrated: 基于手工校准推算
+  resetTime?: string; // 可选预计重置时刻 ISO-8601
+  updatedAt?: string; // 采样或校准时刻 ISO-8601
+}
+
 /** 单个本地数据源（账号实例）汇总信息 */
 export interface DataSourceInfo {
   id: string; // 唯一数据源 ID（如 native、t3:antigravity）
@@ -285,6 +293,11 @@ export interface DataSourceInfo {
   estimatedCostUsd: number; // 当前筛选条件下等效 API 成本（USD）
   cacheHitRate: number; // 当前筛选条件下缓存命中率（0 ~ 1）
   lastActiveAt: string; // 最近活跃时间 ISO-8601
+  mergedKinds?: DataSourceKind[]; // 若按 Google 账号自动合并了多端目录（如 T3 + 原生），列出所含端类型
+  weeklyQuota?: {
+    gemini?: SourcePoolQuotaBadge; // Gemini 池当前 7d 周剩余摘要
+    claude?: SourcePoolQuotaBadge; // Claude 池当前 7d 周剩余摘要
+  };
 }
 
 /** 查询过滤参数 */

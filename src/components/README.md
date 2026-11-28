@@ -1,6 +1,6 @@
 若本文件夹结构或内容变化，请更新本文件。
 
-- `SourceSwitcherBar.tsx`｜多账号总览切换条与分账号费用/Token 明细（移动端友好）
+- `SourceSwitcherBar.tsx`｜多账号总览切换条、同账号合并标记、分账号费用/Token 明细与 7d 周剩百分比直览（移动端友好）
 - `KpiCards.tsx`｜顶部四卡与周剩余 `%` 满额反算（支持按账号隔离周校准与移动端紧凑排版）
 - `DailyUsageCard.tsx`｜每日双轴 / 今日单次消耗折线
 - `CacheHitRateCard.tsx`｜缓存命中率（今日 / 近7天 / TTL 衰减切换）

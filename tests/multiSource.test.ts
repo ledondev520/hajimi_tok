@@ -451,4 +451,173 @@ describe("Multi-Source Service, HTTP API & CLI (server/multiSource.ts)", () => {
     });
     expect(notModifiedRes.status).toBe(304);
   });
+
+  it("auto-merges T3 and native directories sharing the same Google account email, binds live-quota without crosstalk, and exposes weeklyQuota badges", () => {
+    const homeDir = mkTempDir("agy-acct-merge-home-");
+    const t3Root = path.join(homeDir, ".t3", "userdata");
+    const stateRoot = path.join(homeDir, ".hamiji-sta");
+    const hashWork = crypto.createHash("sha256").update("work_t3").digest("hex");
+    const hashSelf = crypto.createHash("sha256").update("self_t3").digest("hex");
+    const workDir = path.join(t3Root, "providers", "antigravity", hashWork, "antigravity-acp");
+    const selfDir = path.join(t3Root, "providers", "antigravity", hashSelf, "antigravity-acp");
+    const nativeAppDir = path.join(homeDir, ".gemini", "antigravity");
+    const nativeCliDir = path.join(homeDir, ".gemini", "antigravity-cli");
+    const nowMs = Date.parse("2026-11-28T05:00:00.000Z");
+
+    fs.mkdirSync(t3Root, { recursive: true });
+    fs.writeFileSync(
+      path.join(t3Root, "settings.json"),
+      JSON.stringify({
+        providerInstances: {
+          work_t3: { driver: "antigravity", displayName: "Work Acct" },
+          self_t3: { driver: "antigravity", displayName: "Personal Acct" },
+        },
+      })
+    );
+
+    // 写入非敏感启动日志标明两个 T3 账号分别属于不同邮箱（并模拟 Work Acct 偶发 1 次串号日志，验证多数投票与 T3 实例互不合并保护）
+    fs.mkdirSync(path.join(workDir, "log"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, "log", "acp-server-20261128_100001-1.log"),
+      "I1128 10:00:01 server_oauth.go:221] applyAuthResult: email=work@example.com, authMethod=consumer\n"
+    );
+    fs.writeFileSync(
+      path.join(workDir, "log", "acp-server-20261128_100002-2.log"),
+      "I1128 10:00:02 server_oauth.go:221] applyAuthResult: email=work@example.com, authMethod=consumer\n"
+    );
+    fs.writeFileSync(
+      path.join(workDir, "log", "acp-server-20261128_100009-3.log"),
+      "I1128 10:00:09 server_oauth.go:221] applyAuthResult: email=self@example.com, authMethod=consumer\n"
+    );
+    fs.mkdirSync(path.join(selfDir, "log"), { recursive: true });
+    fs.writeFileSync(
+      path.join(selfDir, "log", "acp-server-20261128_100000-2.log"),
+      "I1128 10:00:02 server_oauth.go:221] applyAuthResult: email=self@example.com, authMethod=consumer\n"
+    );
+    fs.mkdirSync(nativeCliDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(nativeCliDir, "cli.log"),
+      "I1128 10:05:00 server_oauth.go:221] applyAuthResult: email=self@example.com, authMethod=consumer\n"
+    );
+
+    // 四个目录分别写入会话，验证 self_t3 + nativeApp + nativeCli 三目录合并至 Personal Acct
+    seedAntigravityDataDir(workDir, {
+      conversationId: "conv-work-1",
+      title: "Work Task",
+      workspace: "ws-work",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 50_000,
+      cache: 450_000,
+      output: 10_000,
+      timestampMs: nowMs - 3_600_000,
+    });
+    seedAntigravityDataDir(selfDir, {
+      conversationId: "conv-self-t3",
+      title: "Self T3 Task",
+      workspace: "ws-self",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 100_000,
+      cache: 900_000,
+      output: 20_000,
+      timestampMs: nowMs - 3_600_000,
+    });
+    seedAntigravityDataDir(nativeAppDir, {
+      conversationId: "conv-self-native",
+      title: "Self Native App Task",
+      workspace: "ws-self",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 10_000,
+      cache: 90_000,
+      output: 2_000,
+      timestampMs: nowMs - 2_400_000,
+    });
+    seedAntigravityDataDir(nativeCliDir, {
+      conversationId: "conv-self-cli",
+      title: "Self Native CLI Task",
+      workspace: "ws-self",
+      modelId: "gemini-4-neon-high",
+      modelName: "Gemini 4 Neon (High)",
+      input: 5_000,
+      cache: 45_000,
+      output: 1_000,
+      timestampMs: nowMs - 1_800_000,
+    });
+
+    // 写入官方 live-quota.json（归属 self@example.com）
+    fs.mkdirSync(stateRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(stateRoot, "live-quota.json"),
+      JSON.stringify({
+        updatedAt: new Date(nowMs - 60_000).toISOString(),
+        accountEmail: "self@example.com",
+        pools: {
+          "pool:gemini": {
+            remainingPct: 62.1,
+            resetTime: "2026-12-03T07:05:28Z",
+            updatedAt: new Date(nowMs - 60_000).toISOString(),
+          },
+          "pool:claude": {
+            remainingPct: 96.4,
+            resetTime: "2026-12-01T23:55:17Z",
+            updatedAt: new Date(nowMs - 60_000).toISOString(),
+          },
+        },
+      })
+    );
+
+    const discovered = discoverLocalDataSources({ homeDir, t3UserdataDir: t3Root, stateRootDir: stateRoot });
+    expect(discovered).toHaveLength(2);
+    const selfSrc = discovered.find((s) => s.id === "t3:self_t3");
+    const workSrc = discovered.find((s) => s.id === "t3:work_t3");
+    expect(selfSrc?.mergedKinds).toEqual(["t3", "native"]);
+    expect(selfSrc?.extraDataDirs).toEqual([nativeAppDir, nativeCliDir]);
+    expect(selfSrc?.liveQuotaPath).toBe(path.join(stateRoot, "live-quota.json"));
+    expect(workSrc?.liveQuotaPath).toBeUndefined();
+
+    const service = createMultiSourceTelemetryService("", undefined, {
+      homeDir,
+      t3UserdataDir: t3Root,
+      stateRootDir: stateRoot,
+    });
+
+    // 1. 合并后的 Personal Acct 汇总 3 个目录全部 1,173,000 tokens，并精准携带实时周剩百分比；Work Acct 绝不串号
+    const allSummary = service.getSummary({ source: "all", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(allSummary.sources).toHaveLength(2);
+    const selfCard = allSummary.sources?.find((s) => s.id === "t3:self_t3");
+    const workCard = allSummary.sources?.find((s) => s.id === "t3:work_t3");
+    expect(selfCard?.totalTokens).toBe(1_020_000 + 102_000 + 51_000);
+    expect(selfCard?.mergedKinds).toEqual(["t3", "native"]);
+    expect(selfCard?.weeklyQuota?.gemini?.remainingPct).toBe(62.1);
+    expect(selfCard?.weeklyQuota?.gemini?.source).toBe("live");
+    expect(selfCard?.weeklyQuota?.claude?.remainingPct).toBe(96.4);
+    expect(workCard?.weeklyQuota).toBeUndefined();
+
+    // 2. 单账号切到 Personal Acct 时，liveQuota 的采样分母 poolTokensAtSample 覆盖三目录合并后的全部消耗
+    const selfSummary = service.getSummary({ source: "t3:self_t3", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(selfSummary.liveQuota?.["pool:gemini"]?.remainingPct).toBe(62.1);
+    expect(selfSummary.liveQuota?.["pool:gemini"]?.poolTokensAtSample).toBe(1_020_000 + 102_000 + 51_000);
+
+    // 3. Work Acct 手工校准一次后，顶部卡片也实时展示 calibrated 周剩百分比
+    const workSummary = service.getSummary({ source: "t3:work_t3", cycle: "7d", model: "pool:gemini", nowMs });
+    expect(workSummary.liveQuota).toBeUndefined();
+    const winStart = workSummary.quotaWindow!.windowStart;
+    service.setCalibration?.(
+      `pool:gemini:${winStart}`,
+      {
+        remainingPct: 75,
+        calibratedCostUsd: workSummary.totals.estimatedCostUsd,
+        calibratedTokens: workSummary.totals.totalTokens,
+        calibratedAt: new Date(nowMs - 30_000).toISOString(),
+      },
+      { source: "manual" },
+      "t3:work_t3"
+    );
+    const afterManual = service.getSummary({ source: "all", cycle: "7d", model: "pool:gemini", nowMs });
+    const workCardAfter = afterManual.sources?.find((s) => s.id === "t3:work_t3");
+    expect(workCardAfter?.weeklyQuota?.gemini?.source).toBe("calibrated");
+    expect(workCardAfter?.weeklyQuota?.gemini?.remainingPct).toBe(75);
+  });
 });

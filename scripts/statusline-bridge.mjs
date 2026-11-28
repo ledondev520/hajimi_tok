@@ -269,13 +269,25 @@ export function extractWeeklyQuotaPools(payload) {
   return Object.keys(pools).length > 0 ? pools : null;
 }
 
+/** 从 agy 官方 statusLine JSON 中提取当前登录邮箱（小写归一化，仅本地用于同账号多目录归并，不外传） */
+export function extractAccountEmail(payload) {
+  const raw = payload && typeof payload === "object" ? payload.email : "";
+  if (typeof raw !== "string") return "";
+  const cleaned = raw.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned) ? cleaned : "";
+}
+
 /** 在跨进程文件锁保护下增量合并写入 live-quota.json */
-export function mergeLiveQuotaFile(filePath, incomingPools) {
+export function mergeLiveQuotaFile(filePath, incomingPools, accountEmail = "") {
   return withFileLock(filePath, () => {
     let prevPools = {};
+    let prevEmail = "";
     if (fs.existsSync(filePath)) {
       try {
         const prev = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        if (prev && typeof prev.accountEmail === "string") {
+          prevEmail = prev.accountEmail.trim().toLowerCase();
+        }
         if (prev && typeof prev.pools === "object" && prev.pools && !Array.isArray(prev.pools)) {
           prevPools = prev.pools;
         }
@@ -283,12 +295,20 @@ export function mergeLiveQuotaFile(filePath, incomingPools) {
         prevPools = {};
       }
     }
+    const cleanEmail = typeof accountEmail === "string" ? accountEmail.trim().toLowerCase() : "";
+    const resolvedEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ? cleanEmail : prevEmail;
+    // 若系统钥匙串切换了登录账号，清空旧账号残留配额池防止串号
+    const basePools = resolvedEmail && prevEmail && resolvedEmail !== prevEmail ? {} : prevPools;
     const nowIso = new Date().toISOString();
-    const merged = { ...prevPools };
+    const merged = { ...basePools };
     for (const [k, v] of Object.entries(incomingPools)) {
       merged[k] = { ...v, updatedAt: nowIso };
     }
-    const doc = { updatedAt: nowIso, pools: merged };
+    const doc = {
+      updatedAt: nowIso,
+      ...(resolvedEmail ? { accountEmail: resolvedEmail } : {}),
+      pools: merged,
+    };
     writeJsonAtomic(filePath, doc);
     return doc;
   });
@@ -311,7 +331,8 @@ async function ingestFromStdin() {
   }
   const incomingPools = extractWeeklyQuotaPools(payload);
   if (!incomingPools) return;
-  mergeLiveQuotaFile(LIVE_QUOTA_PATH, incomingPools);
+  const accountEmail = extractAccountEmail(payload);
+  mergeLiveQuotaFile(LIVE_QUOTA_PATH, incomingPools, accountEmail);
 }
 
 const isDirectRun =

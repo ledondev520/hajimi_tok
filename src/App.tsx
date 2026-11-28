@@ -471,7 +471,7 @@ export function App() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen bg-slate-50 text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-50">
+      <div className="min-h-screen overflow-x-hidden bg-slate-50 text-slate-900 transition-colors dark:bg-slate-950 dark:text-slate-50">
         {/* 极简单行顶栏（实心背景免移动端粘性滚动重绘卡顿） */}
         <header className="sticky top-0 z-30 border-b border-slate-200/90 bg-white shadow-2xs dark:border-slate-800/80 dark:bg-slate-950">
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-5">
