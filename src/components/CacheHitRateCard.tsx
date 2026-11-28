@@ -152,10 +152,13 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
     return () => ro.disconnect();
   }, [granularity]);
 
-  // 1.1. 仅在「今日」模式下遍历自然今日单次调用节点
-  const { todayNodes, todayByModel } = useMemo(
-    () => (granularity === "today" ? extractTodayCallSummary(callTimeline, byModel) : { todayNodes: [], todayByModel: [] }),
-    [granularity, callTimeline, byModel]
+  // 1.1. 仅在「今日」模式下遍历自然今日单次调用节点，并结合 dailyTrend 今日桶还原完整今日计数与缓存率
+  const { todayNodes, todayByModel, todayTotalCalls } = useMemo(
+    () =>
+      granularity === "today"
+        ? extractTodayCallSummary(callTimeline, byModel, dailyTrend)
+        : { todayNodes: [], todayByModel: [], todayTotalCalls: 0 },
+    [granularity, callTimeline, byModel, dailyTrend]
   );
 
   // 1.2. 整理「近7天」按日整体与分模型家族缓存命中率序列
@@ -272,7 +275,7 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
         titleOverride="今日缓存率"
         nodes={todayNodes}
         byModel={todayByModel}
-        totalCallCount={todayNodes.length}
+        totalCallCount={todayTotalCalls}
         windowKey={windowKey}
         onWindowKeyChange={onWindowKeyChange}
         hoveredSeq={hoveredSeq}

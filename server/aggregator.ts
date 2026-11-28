@@ -381,7 +381,7 @@ export function createTelemetryService(
 
       let subagentCount = 0, callCount = 0, inputTokens = 0, cacheReadTokens = 0, outputTokens = 0;
       let thinkingTokens = 0, responseTokens = 0, latencySum = 0, estimatedCostUsd = 0, cacheSavedUsd = 0;
-      let todayTotalTokens = 0, todayEstimatedCostUsd = 0, todayCallCount = 0;
+      let todayTotalTokens = 0, todayEstimatedCostUsd = 0;
       let timedCalls = 0, ttftSum = 0, timedOut = 0, timedLatMs = 0, streamOut = 0, streamMs = 0;
 
       for (const conv of filtered) {
@@ -452,7 +452,6 @@ export function createTelemetryService(
           });
           const bk = toLocalBucketKeys(safeTsMs);
           if (bk.dayKey === todayKey) {
-            todayCallCount++;
             todayTotalTokens += s.totalTokens;
             todayEstimatedCostUsd += s.estimatedCostUsd;
           }
@@ -596,7 +595,7 @@ export function createTelemetryService(
           return ttl ? { ...stripped, cacheTtl: ttl } : stripped;
         });
 
-      // 3.1. 按时间升序生成逐次调用增量节点序列（nodeLimit=0 跳过构造；正数时至少保留全部今日节点避免「今日」图表截断）
+      // 3.1. 按时间升序生成逐次调用增量节点序列（严格遵守 nodeLimit 上限，避免高活跃日单次响应膨胀至 MB 级；今日全量汇总由 dailyTrend 今日桶提供）
       let callTimeline: CallNodePoint[] = [];
       if (options.nodeLimit !== 0) {
         rawStepEntries.sort((a, b) => {
@@ -608,7 +607,7 @@ export function createTelemetryService(
         });
         const effLimit =
           options.nodeLimit && options.nodeLimit > 0
-            ? Math.min(MAX_CALL_TIMELINE_NODES, Math.max(options.nodeLimit, todayCallCount))
+            ? Math.min(MAX_CALL_TIMELINE_NODES, options.nodeLimit)
             : MAX_CALL_TIMELINE_NODES;
         const sliceStart = Math.max(0, rawStepEntries.length - effLimit);
         let runningAllTokens = 0;

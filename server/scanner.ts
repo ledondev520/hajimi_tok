@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ConversationDetail, DataSourceHealth, ModelPriceRate, StepUsageRecord } from "../src/types/telemetry";
 import { calculateStepCost, DEFAULT_MODEL_PRICING, matchModelRate } from "./pricing";
 import { decodeGenMetadata, type ParsedGenMetadata } from "./protobuf";
-import { createT3ThreadIndex } from "./t3Threads";
+import { createT3ThreadIndex, type T3ThreadIndex } from "./t3Threads";
 import {
   filterEmptyConversations,
   normalizeConversationWorkspaces,
@@ -386,12 +386,13 @@ export function createTelemetryScanner(
   customDataDir?: string,
   customRates?: ModelPriceRate[],
   t3UserdataDir?: string | null,
+  sharedT3ThreadIndex?: T3ThreadIndex,
 ) {
   const dataDir = customDataDir || resolveDefaultDataDir(); // 实际扫描根目录
   const rates = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效单价表
-  const t3ThreadIndex = createT3ThreadIndex(openSqliteSafe, t3UserdataDir); // T3 线程与正式标题只读索引器
+  const t3ThreadIndex = sharedT3ThreadIndex ?? createT3ThreadIndex(openSqliteSafe, t3UserdataDir); // T3 线程与正式标题只读索引器（多源模式共享单例）
   const cache = new Map<string, CachedConversationEntry>(); // 会话级增量缓存
-  const SCAN_TTL_MS = 2500; // 短时扫描结果复用窗口（毫秒），避免切换模型池时重复 stat/SQLite 阻塞
+  const SCAN_TTL_MS = 4000; // 短时扫描结果复用窗口（毫秒），避免单次多源汇总或切池期间重复 stat/SQLite 阻塞
   let scanVersion = 0; // 数据实际变更版本号，供聚合层安全命中结果缓存
   let lastScanAt = 0; // 上次完整增量扫描的时间戳
   let lastSnapshot: { conversations: ConversationDetail[]; health: DataSourceHealth; version: number } | null = null;

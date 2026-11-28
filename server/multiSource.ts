@@ -20,7 +20,8 @@ import type {
 import { createTelemetryService, type TelemetryServiceOptions } from "./aggregator";
 import { DEFAULT_MODEL_PRICING } from "./pricing";
 import { readLiveQuotaSnapshots, resolveSharedResetsPath } from "./resetStore";
-import { createTelemetryScanner } from "./scanner";
+import { createTelemetryScanner, openSqliteSafe } from "./scanner";
+import { createT3ThreadIndex, type T3ThreadIndex } from "./t3Threads";
 import {
   discoverLocalDataSources,
   type DiscoveredDataSource,
@@ -50,15 +51,16 @@ interface SourceEntry {
 function createAccountDirScanner(
   dirs: string[],
   pricing: ModelPriceRate[],
-  t3UserdataDir?: string | null
+  t3UserdataDir?: string | null,
+  sharedT3ThreadIndex?: T3ThreadIndex
 ): TelemetryScannerInstance {
   const uniqueDirs = [...new Set(dirs.filter(Boolean))];
   if (uniqueDirs.length <= 1) {
-    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir);
+    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir, sharedT3ThreadIndex);
   }
   const subScanners = uniqueDirs.map((dir) => ({
     dir,
-    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir),
+    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir, sharedT3ThreadIndex),
   }));
   let compositeSig = "";
   let combinedVersion = 0;
@@ -373,6 +375,8 @@ export function createMultiSourceTelemetryService(
 
   const t3DirForScanner =
     options.t3UserdataDir !== undefined ? options.t3UserdataDir : options.isolated ? null : undefined;
+  const sharedT3ThreadIndex =
+    t3DirForScanner === null ? undefined : createT3ThreadIndex(openSqliteSafe, t3DirForScanner);
 
   // 0. 单账号退化路径：与历史单源行为完全一致；若单账号自动归并了多个本地目录（如原生 App + CLI）则注入组合扫描器
   if (discovered.length <= 1) {
@@ -381,7 +385,14 @@ export function createMultiSourceTelemetryService(
       ...options,
       t3UserdataDir: t3DirForScanner,
       ...(only?.extraDataDirs && only.extraDataDirs.length > 0
-        ? { scanner: createAccountDirScanner([only.dataDir, ...only.extraDataDirs], pricing, t3DirForScanner) }
+        ? {
+            scanner: createAccountDirScanner(
+              [only.dataDir, ...only.extraDataDirs],
+              pricing,
+              t3DirForScanner,
+              sharedT3ThreadIndex
+            ),
+          }
         : {}),
       ...(only?.liveQuotaPath && !options.liveQuotaPath ? { liveQuotaPath: only.liveQuotaPath } : {}),
     };
@@ -394,7 +405,7 @@ export function createMultiSourceTelemetryService(
     options.sharedResetsPath ?? (!isolatedState ? (resolveSharedResetsPath() ?? undefined) : undefined);
   const entries: SourceEntry[] = discovered.map((meta) => {
     const dirs = [meta.dataDir, ...(meta.extraDataDirs ?? [])];
-    const rawScanner = createAccountDirScanner(dirs, pricing, t3DirForScanner);
+    const rawScanner = createAccountDirScanner(dirs, pricing, t3DirForScanner, sharedT3ThreadIndex);
     const taggedScanner = createTaggedScanner(rawScanner, meta);
     const resolvedLiveQuotaPath =
       meta.liveQuotaPath ??

@@ -116,65 +116,71 @@ export function resolveDayMeta(
 }
 
 /**
- * 职责：筛选自然今日的调用节点并按模型汇总，供「今日」模式折线图复用。
- * 参数：callTimeline — 全量调用节点序列；byModel — 周期内分模型汇总。
- * 返回值：包含 todayNodes 与 todayByModel 的对象。
+ * 职责：筛选自然今日的调用节点并按模型汇总，供「今日」模式折线图复用（当 callTimeline 因 nodeLimit 仅含尾部节点时，自动用 dailyTrend 今日桶补齐真实全天轮数与分模型累计值）。
+ * 参数：callTimeline — 调用节点序列；byModel — 周期内分模型汇总；dailyTrend — 可选按日趋势桶（用于还原受 nodeLimit 截断的今日全量计数与模型汇总）。
+ * 返回值：包含 todayNodes、todayByModel 与 todayTotalCalls 的对象。
  */
 export function extractTodayCallSummary(
   callTimeline: CallNodePoint[],
-  byModel: ModelUsageBreakdown[]
-): { todayNodes: CallNodePoint[]; todayByModel: ModelUsageBreakdown[] } {
+  byModel: ModelUsageBreakdown[],
+  dailyTrend?: UsageTimeBucket[]
+): { todayNodes: CallNodePoint[]; todayByModel: ModelUsageBreakdown[]; todayTotalCalls: number } {
   const todayKey = toLocalDayKey(new Date());
   const matchedNodes = callTimeline.filter((n) => {
     const parsed = new Date(n.timestamp);
     return !Number.isNaN(parsed.getTime()) && toLocalDayKey(parsed) === todayKey;
   });
-
-  const modelStatsMap = new Map<
-    string,
-    { inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number }
-  >();
-  for (const n of matchedNodes) {
-    const cur = modelStatsMap.get(n.modelName) ?? {
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
+  const todayBucket = dailyTrend?.find((b) => b.bucketKey === todayKey);
+  const todayTotalCalls = Math.max(matchedNodes.length, todayBucket?.callCount ?? 0);
+  const toBreakdown = (
+    modelName: string,
+    s: { modelId?: string; callCount?: number; inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd?: number }
+  ): ModelUsageBreakdown => {
+    const ref = byModel.find((item) => item.modelName === modelName);
+    const promptSum = s.inputTokens + s.cacheReadTokens;
+    return {
+      modelName,
+      modelId: s.modelId || ref?.modelId || modelName,
+      conversationCount: 0,
+      callCount: s.callCount ?? 0,
+      inputTokens: s.inputTokens,
+      cacheReadTokens: s.cacheReadTokens,
+      outputTokens: s.outputTokens,
+      thinkingTokens: 0,
+      responseTokens: 0,
+      totalTokens: s.totalTokens,
+      cacheHitRate: promptSum > 0 ? s.cacheReadTokens / promptSum : 0,
+      avgLatencyMs: 0,
+      avgOutputTps: ref?.avgOutputTps ?? 0,
+      avgStreamingTps: ref?.avgStreamingTps ?? 0,
+      estimatedCostUsd: s.estimatedCostUsd ?? 0,
+      cacheSavedUsd: 0,
+      shareOfTotalTokens: 0,
     };
+  };
+
+  if (todayBucket?.models && todayBucket.models.length > 0 && todayBucket.callCount > matchedNodes.length) {
+    return {
+      todayNodes: matchedNodes,
+      todayByModel: todayBucket.models.map((m) => toBreakdown(m.modelName, m)),
+      todayTotalCalls,
+    };
+  }
+
+  const modelStatsMap = new Map<string, { inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number }>();
+  for (const n of matchedNodes) {
+    const cur = modelStatsMap.get(n.modelName) ?? { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
     cur.inputTokens += n.inputTokens;
     cur.cacheReadTokens += n.cacheReadTokens;
     cur.outputTokens += n.outputTokens;
     cur.totalTokens += n.totalTokens;
     modelStatsMap.set(n.modelName, cur);
   }
-
-  const mappedModels: ModelUsageBreakdown[] = [...modelStatsMap.entries()].map(
-    ([modelName, stats]) => {
-      const ref = byModel.find((m) => m.modelName === modelName);
-      const promptSum = stats.inputTokens + stats.cacheReadTokens;
-      return {
-        modelName,
-        modelId: ref?.modelId ?? modelName,
-        conversationCount: 0,
-        callCount: 0,
-        inputTokens: stats.inputTokens,
-        cacheReadTokens: stats.cacheReadTokens,
-        outputTokens: stats.outputTokens,
-        thinkingTokens: 0,
-        responseTokens: 0,
-        totalTokens: stats.totalTokens,
-        cacheHitRate: promptSum > 0 ? stats.cacheReadTokens / promptSum : 0,
-        avgLatencyMs: 0,
-        avgOutputTps: ref?.avgOutputTps ?? 0,
-        avgStreamingTps: ref?.avgStreamingTps ?? 0,
-        estimatedCostUsd: 0,
-        cacheSavedUsd: 0,
-        shareOfTotalTokens: 0,
-      };
-    }
-  );
-
-  return { todayNodes: matchedNodes, todayByModel: mappedModels };
+  return {
+    todayNodes: matchedNodes,
+    todayByModel: [...modelStatsMap.entries()].map(([name, stats]) => toBreakdown(name, stats)),
+    todayTotalCalls,
+  };
 }
 
 /**
@@ -246,10 +252,13 @@ export const DailyUsageCard = memo(function DailyUsageCard({
     return () => ro.disconnect();
   }, [granularity]);
 
-  // 1.1. 仅在「今日」模式下筛选自然今日的单次调用节点，默认按日模式零遍历开销
-  const { todayNodes, todayByModel } = useMemo(
-    () => (granularity === "today" ? extractTodayCallSummary(callTimeline, byModel) : { todayNodes: [], todayByModel: [] }),
-    [granularity, callTimeline, byModel]
+  // 1.1. 仅在「今日」模式下筛选自然今日的单次调用节点，并结合 dailyTrend 今日桶保持全天轮数与模型均值准确
+  const { todayNodes, todayByModel, todayTotalCalls } = useMemo(
+    () =>
+      granularity === "today"
+        ? extractTodayCallSummary(callTimeline, byModel, dailyTrend)
+        : { todayNodes: [], todayByModel: [], todayTotalCalls: 0 },
+    [granularity, callTimeline, byModel, dailyTrend]
   );
 
   // 1.2. 整理「近7天」按日分模型序列数据
@@ -361,7 +370,7 @@ export const DailyUsageCard = memo(function DailyUsageCard({
         titleOverride="今日消耗"
         nodes={todayNodes}
         byModel={todayByModel}
-        totalCallCount={todayNodes.length}
+        totalCallCount={todayTotalCalls}
         windowKey={windowKey}
         onWindowKeyChange={onWindowKeyChange}
         hoveredSeq={hoveredSeq}

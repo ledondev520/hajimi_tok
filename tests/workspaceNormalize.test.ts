@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryService } from "../server/aggregator";
 import { createMultiSourceTelemetryService } from "../server/multiSource";
 import { parseWorkspaceUris, TEMP_CHAT_WORKSPACE } from "../server/scanner";
+import { createT3ThreadIndex } from "../server/t3Threads";
+import { extractTodayCallSummary } from "../src/components/DailyUsageCard";
 import { groupByMainConversation } from "../src/lib/conversationGroups";
 import { recalculateSummaryWithCustomRates } from "../src/lib/format";
 
@@ -374,5 +376,78 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     expect(groups[0].subagentChildCount).toBe(1);
     expect(groups[0].children).toHaveLength(2);
     expect(groups[0].rolledInputTokens).toBe(1000 + 2000 + 500);
+  });
+
+  it("reads live WAL+SHM statev2.sqlite via zero-copy readOnly path without invoking temp snapshot copy", () => {
+    const t3Dir = makeTempDir("hajimi-t3-wal-zero-copy-");
+    const dbPath = path.join(t3Dir, "statev2.sqlite");
+    const runId = "dddd4444-4444-4444-8444-444444444444";
+
+    const writer = new DatabaseSync(dbPath);
+    writer.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE orchestration_v2_projection_threads (thread_id text primary key, title text);
+      CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id text primary key, thread_id text, payload_json text);
+      CREATE TABLE scheduled_tasks (task_id text primary key, title text, thread_id text);
+    `);
+    writer.prepare("INSERT INTO orchestration_v2_projection_threads VALUES (?, ?)").run(
+      "thread:project:demo:wal-live",
+      "活跃 WAL 正式标题"
+    );
+    writer.prepare("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)").run(
+      `provider-thread:provider:antigravity:native-thread:${runId}`,
+      "thread:project:demo:wal-live",
+      JSON.stringify({ nativeThreadRef: { driver: "antigravity", nativeId: runId } })
+    );
+
+    try {
+      expect(fs.existsSync(`${dbPath}-wal`)).toBe(true);
+      expect(fs.existsSync(`${dbPath}-shm`)).toBe(true);
+
+      let fallbackCalls = 0;
+      const idx = createT3ThreadIndex(() => {
+        fallbackCalls += 1;
+        throw new Error("should not fall back to temp snapshot copy when live WAL+SHM is readable");
+      }, t3Dir);
+      const map = idx.load(true);
+      expect(fallbackCalls).toBe(0);
+      expect(map.get(runId)?.t3ThreadTitle).toBe("活跃 WAL 正式标题");
+    } finally {
+      writer.close();
+    }
+  });
+
+  it("strictly caps callTimeline to nodeLimit even on high-volume today while preserving full today totals", () => {
+    const dataDir = makeTempDir("hajimi-nodelimit-today-");
+    const convId = "eeee5555-5555-4555-8555-555555555555";
+    const now = new Date();
+    const baseMs = now.getTime() - 10 * 60_000;
+    const logDir = path.join(dataDir, "brain", convId, ".system_generated", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const lines = Array.from({ length: 5 }, (_, i) =>
+      JSON.stringify({
+        step_index: i + 1,
+        type: "PLANNER_RESPONSE",
+        created_at: new Date(baseMs + i * 60_000).toISOString(),
+        input_tokens: 1000,
+        cache_read_tokens: 4000,
+        output_tokens: 200,
+      })
+    );
+    fs.writeFileSync(path.join(logDir, "transcript.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+    const svc = createTelemetryService(dataDir, undefined, { isolated: true });
+    const summary = svc.getSummary({ cycle: "7d", nodeLimit: 2, nowMs: now.getTime() });
+    expect(summary.callTimeline).toHaveLength(2);
+    expect(summary.totals.callCount).toBe(5);
+
+    const { todayNodes, todayByModel, todayTotalCalls } = extractTodayCallSummary(
+      summary.callTimeline,
+      summary.byModel,
+      summary.dailyTrend
+    );
+    expect(todayNodes).toHaveLength(2);
+    expect(todayTotalCalls).toBe(5);
+    expect(todayByModel.reduce((acc, m) => acc + m.totalTokens, 0)).toBe(5 * 5200);
   });
 });
