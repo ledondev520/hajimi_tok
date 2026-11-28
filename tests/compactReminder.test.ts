@@ -1,6 +1,6 @@
 /**
  * Input: vitest 断言工具、node:fs/os/path/child_process，以及 scripts/compact-reminder-hook.mjs 导出函数。
- * Output: 覆盖 400K 上下文软提醒 Hook 的触发阈值、零熔断、周期去重、CHECKPOINT/回落重置、跨块 UTF-8 边界、CLI 管道及无侵入安装卸载测试。
+ * Output: 覆盖 400K 上下文软提醒 Hook 的触发阈值、零熔断、防宿主 metadata panic 回归、周期去重、CHECKPOINT/回落重置、跨块 UTF-8 边界、CLI 管道及无侵入安装卸载测试。
  * Pos: 可选 400K 压缩软提醒 Hook 单元测试套件（tests/compactReminder.test.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -66,18 +66,19 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
     ]);
     expect(mod.handlePreInvocation({ transcriptPath: underPath, modelName: "gemini-4-neon-xhigh" })).toEqual({});
 
-    // 2. 首次跨过 400K：输出大字加粗斜体 user_markdown + 结尾指令，且绝不熔断（terminationBehavior === ""）
+    // 2. 首次跨过 400K：输出纯 systemMessage 结尾指令（省略 metadata 防 Antigravity scrubMessage panic），且绝不熔断（terminationBehavior === ""）
     const crossPath = writeJsonl(dir, "cross.jsonl", [
       { type: "PLANNER_RESPONSE", input_tokens: 5_000, cache_read_tokens: 400_000 },
     ]);
     const res1 = mod.handlePreInvocation({ transcriptPath: crossPath, modelName: "gemini-4-neon-xhigh" }) as {
       terminationBehavior: string;
-      injectSteps: Array<{ systemMessage: { systemMessage: string; metadata: { user_markdown: string } } }>;
+      injectSteps: Array<{ systemMessage: { systemMessage: string; metadata?: Record<string, string> } }>;
     };
     expect(res1.terminationBehavior).toBe("");
     expect(res1.injectSteps).toHaveLength(1);
     expect(res1.injectSteps[0].systemMessage.systemMessage.startsWith(mod.REMINDER_MARKER)).toBe(true);
-    expect(res1.injectSteps[0].systemMessage.metadata.user_markdown).toContain("### ***⚠️ 上下文已达 405K / 512K");
+    expect(res1.injectSteps[0].systemMessage.systemMessage).toContain("405K / 512K");
+    expect(res1.injectSteps[0].systemMessage.metadata).toBeUndefined();
 
     // 3. 同压缩周期涨到 470K 或立即重试均不重复提醒
     const repeatPath = writeJsonl(dir, "repeat.jsonl", [
@@ -102,11 +103,12 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
       { type: "PLANNER_RESPONSE", input_tokens: 10_000, cache_read_tokens: 392_000 },
     ]);
     const res2 = mod.handlePreInvocation({ transcriptPath: nextCyclePath, modelName: "claude-opus-5.5" }) as {
-      injectSteps: Array<{ systemMessage: { metadata: { user_markdown: string } } }>;
+      injectSteps: Array<{ systemMessage: { systemMessage: string; metadata?: Record<string, string> } }>;
     };
     expect(res2.injectSteps).toHaveLength(1);
-    expect(res2.injectSteps[0].systemMessage.metadata.user_markdown).toContain("402K —");
-    expect(res2.injectSteps[0].systemMessage.metadata.user_markdown).not.toContain("512K");
+    expect(res2.injectSteps[0].systemMessage.systemMessage).toContain("402K");
+    expect(res2.injectSteps[0].systemMessage.systemMessage).not.toContain("512K");
+    expect(res2.injectSteps[0].systemMessage.metadata).toBeUndefined();
 
     // 5. 超过 256KB 分块且含多字节 UTF-8 中文时仍准确去重
     const bigRows: Array<Record<string, unknown>> = [
@@ -125,9 +127,13 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
       input: JSON.stringify({ transcriptPath: crossPath, modelName: "gemini-4-neon-xhigh" }),
       encoding: "utf8",
     });
-    const parsed = JSON.parse(stdout.trim()) as { terminationBehavior: string; injectSteps: unknown[] };
+    const parsed = JSON.parse(stdout.trim()) as {
+      terminationBehavior: string;
+      injectSteps: Array<{ systemMessage: { systemMessage: string; metadata?: Record<string, string> } }>;
+    };
     expect(parsed.terminationBehavior).toBe("");
     expect(parsed.injectSteps).toHaveLength(1);
+    expect(parsed.injectSteps[0].systemMessage.metadata).toBeUndefined();
   });
 
   it("installs and uninstalls safely into hooks.json without clobbering existing or custom hooks", async () => {

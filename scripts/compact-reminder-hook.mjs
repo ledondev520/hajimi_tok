@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Input: Antigravity PreInvocation Hook stdin JSON（含 transcriptPath、modelName），或命令行参数 --install / --uninstall。
- * Output: 上下文 Prompt（input_tokens + cache_read_tokens）在当前压缩周期首次达到 400K 时输出一次性纯软提醒 Hook JSON（内联醒目 user_markdown + 引导模型在结尾拟好 `/compact` 指令，绝不熔断）；支持安全无侵入安装/卸载至 ~/.gemini/config/hooks.json。
+ * Output: 上下文 Prompt（input_tokens + cache_read_tokens）在当前压缩周期首次达到 400K 时输出一次性纯软提醒 Hook JSON（向模型注入 systemMessage 引导在回复末尾拟好 `/compact` 指令，省略 metadata 以规避 Antigravity 宿主 scrubMessage panic，绝不熔断）；支持安全无侵入安装/卸载至 ~/.gemini/config/hooks.json。
  * Pos: Antigravity 全局 400K 上下文压缩软提醒 Hook 脚本（service:install 自动无侵入注册，支持随时卸载）（scripts/compact-reminder-hook.mjs）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -161,27 +161,16 @@ export function handlePreInvocation(payload) {
   const usedK = Math.round(latestPrompt / 1000);
   const limitSuffix = /(?:neon|carbon|argon|hydrogen)/i.test(modelName) ? " / 512K" : "";
 
-  const userMarkdown = [
-    "---",
-    `### ***⚠️ 上下文已达 ${usedK}K${limitSuffix} — 建议本轮结束后趁热执行 \`/compact\`***`,
-    "",
-    "> [!WARNING]",
-    "> ***上下文已超过 400K 提醒线。建议本轮完成后直接发送末尾拟好的 `/compact` 指令压缩续跑，避免拖到 ~510K 触顶卡顿或掉缓存冷读（本压缩周期仅提醒一次，不中断当前任务）。***",
-    "---",
-  ].join("\n");
-
   const systemMessage =
     `${REMINDER_MARKER} 当前会话上下文已达 ${usedK}K${limitSuffix}（≥400K 纯软提醒，严禁因此停工、中断或拒答）。` +
     "请正常完成本轮全部工作，仅在最终回复的最末尾用 `### ***...***` 醒目附上一行可直接复制的 `/compact 保留<本阶段核心结论、关键文件路径与约束>；接下来继续<下一步明确动作>` 建议。";
 
+  // shortcut: 省略 metadata.user_markdown，因 Antigravity 宿主 utils.scrubMessage 会对 map<string,string> panic；待宿主修复 proto_utils.go 后可恢复
   return {
     injectSteps: [
       {
         systemMessage: {
           systemMessage,
-          metadata: {
-            user_markdown: userMarkdown,
-          },
         },
       },
     ],
