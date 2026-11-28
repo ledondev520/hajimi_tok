@@ -556,14 +556,14 @@ export const KpiCards = memo(function KpiCards({
                   variant="outline"
                   className="h-4 cursor-default border-violet-500/30 px-1.5 text-[10px] text-violet-700 tabular-nums dark:text-violet-300"
                 >
-                  {totals.avgStreamingTps > 0
-                    ? `${totals.avgStreamingTps.toFixed(1)} tok/s`
+                  {totals.avgOutputTps > 0
+                    ? `${totals.avgOutputTps.toFixed(1)} tok/s`
                     : `思考 ${totals.outputTokens > 0 ? `${thinkingPct.toFixed(0)}%` : "0%"}`}
                 </Badge>
               </TooltipTrigger>
               <TooltipContent className="max-w-xs">
-                {totals.avgStreamingTps > 0
-                  ? `流式吐字 TPS：${totals.avgStreamingTps.toFixed(1)} tok/s（扣除首包等待） · 端到端有效 TPS：${totals.avgOutputTps.toFixed(1)} tok/s（均首包 TTFT ${formatDurationMs(totals.avgTtftMs)}）`
+                {totals.avgOutputTps > 0
+                  ? `端到端有效 TPS：${totals.avgOutputTps.toFixed(1)} tok/s（含均首包等待 ${formatDurationMs(totals.avgTtftMs)}${totals.avgStreamingTps > 0 ? ` · 扣首包纯吐字 ${totals.avgStreamingTps.toFixed(1)} tok/s` : ""}）`
                   : "暂无已完成耗时记录，待模型落盘 gen_metadata 后自动计算 TPS"}
               </TooltipContent>
             </Tooltip>

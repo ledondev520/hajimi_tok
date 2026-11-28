@@ -233,7 +233,7 @@ export function renderCliReport(summary: DashboardSummaryPayload, limit = 10): s
         ["Today's Tokens", fmtMetric(totals.todayTotalTokens, "int"), `Today Est. Cost: ${fmtMetric(totals.todayEstimatedCostUsd, "usd")}`],
         ["Uncached Input", fmtMetric(totals.inputTokens, "int"), "Fresh prompt & tool result tokens"],
         ["Cache Read", fmtMetric(totals.cacheReadTokens, "int"), `Cache Hit Rate: ${fmtMetric(totals.cacheHitRate, "pct")}`],
-        ["Output Tokens", fmtMetric(totals.outputTokens, "int"), `Thinking: ${fmtMetric(totals.thinkingTokens, "int")} | Response: ${fmtMetric(totals.responseTokens, "int")}${totals.avgStreamingTps > 0 ? ` | Stream TPS: ${totals.avgStreamingTps.toFixed(1)}/s (E2E ${totals.avgOutputTps.toFixed(1)}/s)` : ""}`],
+        ["Output Tokens", fmtMetric(totals.outputTokens, "int"), `Thinking: ${fmtMetric(totals.thinkingTokens, "int")} | Response: ${fmtMetric(totals.responseTokens, "int")}${totals.avgOutputTps > 0 ? ` | TPS: ${totals.avgOutputTps.toFixed(1)}/s (Stream ${totals.avgStreamingTps.toFixed(1)}/s)` : ""}`],
         ["Est. API Cost", fmtMetric(totals.estimatedCostUsd, "usd"), `Prompt Cache Savings: ${fmtMetric(totals.cacheSavedUsd, "usd")}`],
       ],
     )}`,
