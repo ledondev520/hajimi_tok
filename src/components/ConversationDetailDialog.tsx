@@ -357,9 +357,7 @@ function ConversationCacheRateChart({
             className="pointer-events-none absolute z-20 w-[216px] rounded-lg border border-slate-200 bg-white/95 p-2 text-[11px] shadow-md backdrop-blur-xs dark:border-slate-700 dark:bg-slate-900/95"
           >
             <div className="flex items-center justify-between gap-1 font-mono text-[10px] text-slate-400">
-              <span>
-                #{active.step.callIndex + 1} / S{active.step.stepIndex}
-              </span>
+              <span>#{active.step.callIndex + 1}</span>
               <span>{formatDateTime(active.step.timestamp)}</span>
             </div>
             <div className="mt-0.5 flex items-center gap-1 truncate text-[10px] font-medium text-slate-600 dark:text-slate-300">
@@ -683,9 +681,11 @@ export function ConversationDetailDialog({
                           key={`${step.callIndex}-${step.stepIndex}`}
                           className="border-slate-200/60 text-xs dark:border-slate-800/70"
                         >
-                          <TableCell className="font-mono tabular-nums">
-                            #{step.callIndex + 1}{" "}
-                            <span className="text-slate-400">/ S{step.stepIndex}</span>
+                          <TableCell
+                            title={step.stepIndex > 0 ? `底层轨迹步号 S${step.stepIndex}` : undefined}
+                            className="font-mono tabular-nums"
+                          >
+                            #{step.callIndex + 1}
                           </TableCell>
                           <TableCell className="font-mono text-slate-500 tabular-nums dark:text-slate-400">
                             <div className="flex items-center gap-1.5 whitespace-nowrap">
