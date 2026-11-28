@@ -1,7 +1,7 @@
 /**
  * Input: radix-ui Select 无障碍下拉原语、lucide-react 图标与 @/lib/utils。
- * Output: 导出 Select、SelectTrigger、SelectContent、SelectItem 等选择器组件。
- * Pos: src/components/ui/select.tsx，时间范围、工作区与模型筛选下拉基础 UI 组件（由 shadcn CLI 生成）。
+ * Output: 导出 Select、SelectValue、SelectTrigger、SelectContent、SelectItem 组件。
+ * Pos: src/components/ui/select.tsx，时间范围、工作区与模型筛选下拉基础 UI 组件。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import * as React from "react"
@@ -9,52 +9,20 @@ import { cn } from "@/lib/utils"
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Select as SelectPrimitive } from "radix-ui"
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 Select。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function Select({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Root>) {
+function Select(props: React.ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root data-slot="select" {...props} />
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectGroup。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectGroup({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Group>) {
-  return <SelectPrimitive.Group data-slot="select-group" {...props} />
-}
-
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectValue。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectValue({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Value>) {
+function SelectValue(props: React.ComponentProps<typeof SelectPrimitive.Value>) {
   return <SelectPrimitive.Value data-slot="select-value" {...props} />
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectTrigger。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
 function SelectTrigger({
   className,
   size = "default",
   children,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
-  size?: "sm" | "default"
-}) {
+}: React.ComponentProps<typeof SelectPrimitive.Trigger> & { size?: "sm" | "default" }) {
   return (
     <SelectPrimitive.Trigger
       data-slot="select-trigger"
@@ -73,11 +41,6 @@ function SelectTrigger({
   )
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectContent。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
 function SelectContent({
   className,
   children,
@@ -99,7 +62,9 @@ function SelectContent({
         align={align}
         {...props}
       >
-        <SelectScrollUpButton />
+        <SelectPrimitive.ScrollUpButton className="flex cursor-default items-center justify-center py-1">
+          <ChevronUpIcon className="size-4" />
+        </SelectPrimitive.ScrollUpButton>
         <SelectPrimitive.Viewport
           className={cn(
             "p-1",
@@ -109,35 +74,14 @@ function SelectContent({
         >
           {children}
         </SelectPrimitive.Viewport>
-        <SelectScrollDownButton />
+        <SelectPrimitive.ScrollDownButton className="flex cursor-default items-center justify-center py-1">
+          <ChevronDownIcon className="size-4" />
+        </SelectPrimitive.ScrollDownButton>
       </SelectPrimitive.Content>
     </SelectPrimitive.Portal>
   )
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectLabel。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectLabel({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Label>) {
-  return (
-    <SelectPrimitive.Label
-      data-slot="select-label"
-      className={cn("px-2 py-1.5 text-xs text-slate-500 dark:text-slate-400", className)}
-      {...props}
-    />
-  )
-}
-
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectItem。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
 function SelectItem({
   className,
   children,
@@ -165,79 +109,4 @@ function SelectItem({
   )
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectSeparator。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectSeparator({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Separator>) {
-  return (
-    <SelectPrimitive.Separator
-      data-slot="select-separator"
-      className={cn("pointer-events-none -mx-1 my-1 h-px bg-slate-200 dark:bg-slate-800", className)}
-      {...props}
-    />
-  )
-}
-
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectScrollUpButton。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectScrollUpButton({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.ScrollUpButton>) {
-  return (
-    <SelectPrimitive.ScrollUpButton
-      data-slot="select-scroll-up-button"
-      className={cn(
-        "flex cursor-default items-center justify-center py-1",
-        className
-      )}
-      {...props}
-    >
-      <ChevronUpIcon className="size-4" />
-    </SelectPrimitive.ScrollUpButton>
-  )
-}
-
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 SelectScrollDownButton。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function SelectScrollDownButton({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.ScrollDownButton>) {
-  return (
-    <SelectPrimitive.ScrollDownButton
-      data-slot="select-scroll-down-button"
-      className={cn(
-        "flex cursor-default items-center justify-center py-1",
-        className
-      )}
-      {...props}
-    >
-      <ChevronDownIcon className="size-4" />
-    </SelectPrimitive.ScrollDownButton>
-  )
-}
-
-export {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectScrollDownButton,
-  SelectScrollUpButton,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-}
+export { Select, SelectContent, SelectItem, SelectTrigger, SelectValue }

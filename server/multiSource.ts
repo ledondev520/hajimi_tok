@@ -46,36 +46,32 @@ interface SourceEntry {
   liveQuotaPath?: string;
 }
 
+/** 判定跨目录/跨源同 conversationId 的两条快照哪条更完整（优先步数更多、Token 更多、状态明确与更新时间更新） */
+function isBetterConversationRecord(next: ConversationDetail, prev: ConversationDetail): boolean {
+  if (next.steps.length !== prev.steps.length) return next.steps.length > prev.steps.length;
+  if (next.totalTokens !== prev.totalTokens) return next.totalTokens > prev.totalTokens;
+  const nextKnown = Boolean(next.status && next.status !== "unknown");
+  const prevKnown = Boolean(prev.status && prev.status !== "unknown");
+  if (nextKnown !== prevKnown) return nextKnown;
+  return next.lastModifiedAt > prev.lastModifiedAt;
+}
+
 /**
- * 职责：为单个逻辑账号合并多个本地数据目录（如 T3 ACP 目录 + 同 Google 账号的原生 ~/.gemini/antigravity 与 antigravity-cli）的增量扫描结果。
- * 参数：dirs — 属于同一账号的目录列表；pricing — 费率表。
- * 返回值：透明兼容 createTelemetryScanner 的组合扫描器（按 conversationId 自动去重）。
+ * 职责：通用组合扫描器——复用各子扫描器增量缓存，按 conversationId 去重择优，并汇总健康状态与告警。
+ * 思路：同时服务于「同账号多目录合并」与「跨账号合并态 all」两类场景，消除重复合并状态机。
  */
-function createAccountDirScanner(
-  dirs: string[],
-  pricing: ModelPriceRate[],
-  t3UserdataDir?: string | null,
-  sharedT3ThreadIndex?: T3ThreadIndex,
-  scanCacheRootDir?: string | null
+function combineScanners(
+  items: Array<{ key: string; scanner: TelemetryScannerInstance; tag?: DiscoveredDataSource }>,
+  dataDirLabel: string
 ): TelemetryScannerInstance {
-  const uniqueDirs = [...new Set(dirs.filter(Boolean))];
-  const toCachePath = (dir?: string) =>
-    scanCacheRootDir && dir ? resolveScanCachePath(scanCacheRootDir, dir) : undefined;
-  if (uniqueDirs.length <= 1) {
-    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(uniqueDirs[0]));
-  }
-  const subScanners = uniqueDirs.map((dir) => ({
-    dir,
-    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(dir)),
-  }));
   let compositeSig = "";
   let combinedVersion = 0;
   let lastCombined: ReturnType<TelemetryScannerInstance["scan"]> | null = null;
 
   return {
     scan(forceRefresh = false) {
-      const snaps = subScanners.map((s) => ({ dir: s.dir, snap: s.scanner.scan(forceRefresh) }));
-      const nextSig = snaps.map((x) => `${x.dir}:${x.snap.version}`).join("|");
+      const snaps = items.map((item) => ({ item, snap: item.scanner.scan(forceRefresh) }));
+      const nextSig = snaps.map((x) => `${x.item.key}:${x.snap.version}`).join("|");
       if (lastCombined && !forceRefresh && nextSig === compositeSig) {
         return lastCombined;
       }
@@ -91,7 +87,7 @@ function createAccountDirScanner(
       let sqliteReadMode: DataSourceHealth["sqliteReadMode"] = "none";
       const warnings: string[] = [];
 
-      for (const { snap } of snaps) {
+      for (const { item, snap } of snaps) {
         if (snap.health.exists) exists = true;
         if (snap.health.summaryDbAvailable) summaryDbAvailable = true;
         conversationDbCount += snap.health.conversationDbCount;
@@ -102,15 +98,18 @@ function createAccountDirScanner(
         } else if (sqliteReadMode === "none" && snap.health.sqliteReadMode === "immutable-fallback") {
           sqliteReadMode = "immutable-fallback";
         }
-        warnings.push(...snap.health.warnings);
+        if (item.tag) {
+          for (const w of snap.health.warnings) warnings.push(`[${item.tag.label}] ${w}`);
+        } else {
+          warnings.push(...snap.health.warnings);
+        }
         for (const c of snap.conversations) {
-          const prev = byConvId.get(c.conversationId);
-          if (
-            !prev ||
-            c.steps.length > prev.steps.length ||
-            (c.steps.length === prev.steps.length && c.lastModifiedAt > prev.lastModifiedAt)
-          ) {
-            byConvId.set(c.conversationId, c);
+          const rec: ConversationDetail = item.tag
+            ? { ...c, sourceId: item.tag.id, sourceLabel: item.tag.label }
+            : c;
+          const prev = byConvId.get(rec.conversationId);
+          if (!prev || isBetterConversationRecord(rec, prev)) {
+            byConvId.set(rec.conversationId, rec);
           }
         }
       }
@@ -118,7 +117,7 @@ function createAccountDirScanner(
       lastCombined = {
         conversations: [...byConvId.values()],
         health: {
-          dataDir: `${uniqueDirs[0]} (+${uniqueDirs.length - 1} 目录)`,
+          dataDir: dataDirLabel,
           exists,
           summaryDbAvailable,
           conversationDbCount,
@@ -135,11 +134,30 @@ function createAccountDirScanner(
   };
 }
 
-/**
- * 职责：将单个数据源的增量扫描器包装为自动附加 sourceId / sourceLabel 的代理扫描器。
- * 参数：scanner — 底层目录扫描器；meta — 数据源元信息。
- * 返回值：兼容 createTelemetryScanner 返回签名的代理扫描器。
- */
+/** 为单个逻辑账号合并多个本地数据目录（如 T3 ACP 目录 + 同 Google 账号的原生 ~/.gemini/antigravity 与 antigravity-cli） */
+function createAccountDirScanner(
+  dirs: string[],
+  pricing: ModelPriceRate[],
+  t3UserdataDir?: string | null,
+  sharedT3ThreadIndex?: T3ThreadIndex,
+  scanCacheRootDir?: string | null
+): TelemetryScannerInstance {
+  const uniqueDirs = [...new Set(dirs.filter(Boolean))];
+  const toCachePath = (dir?: string) =>
+    scanCacheRootDir && dir ? resolveScanCachePath(scanCacheRootDir, dir) : undefined;
+  if (uniqueDirs.length <= 1) {
+    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(uniqueDirs[0]));
+  }
+  return combineScanners(
+    uniqueDirs.map((dir) => ({
+      key: dir,
+      scanner: createTelemetryScanner(dir, pricing, t3UserdataDir, sharedT3ThreadIndex, toCachePath(dir)),
+    })),
+    `${uniqueDirs[0]} (+${uniqueDirs.length - 1} 目录)`
+  );
+}
+
+/** 将单个数据源的增量扫描器包装为自动附加 sourceId / sourceLabel 的代理扫描器 */
 function createTaggedScanner(
   scanner: TelemetryScannerInstance,
   meta: DiscoveredDataSource
@@ -166,91 +184,12 @@ function createTaggedScanner(
   };
 }
 
-/** 判定跨源同 conversationId 的两条快照哪条更完整（优先步数更多、Token 更多、状态明确与更新时间更新） */
-function isBetterConversationRecord(next: ConversationDetail, prev: ConversationDetail): boolean {
-  if (next.steps.length !== prev.steps.length) return next.steps.length > prev.steps.length;
-  if (next.totalTokens !== prev.totalTokens) return next.totalTokens > prev.totalTokens;
-  const nextKnown = Boolean(next.status && next.status !== "unknown");
-  const prevKnown = Boolean(prev.status && prev.status !== "unknown");
-  if (nextKnown !== prevKnown) return nextKnown;
-  return next.lastModifiedAt > prev.lastModifiedAt;
-}
-
-/**
- * 职责：构造跨数据源合并扫描器，复用各单源增量缓存、按 conversationId 去重并将全部会话与健康指标合并输出。
- * 参数：entries — 各数据源及其共享扫描器列表。
- * 返回值：供合并态 "all" TelemetryProvider 使用的扫描器。
- */
+/** 构造跨数据源合并扫描器，供合并态 "all" TelemetryProvider 使用 */
 function createMergedScanner(entries: SourceEntry[]): TelemetryScannerInstance {
-  let compositeSig = "";
-  let mergedVersion = 0;
-  let lastMerged: ReturnType<TelemetryScannerInstance["scan"]> | null = null;
-
-  return {
-    scan(forceRefresh = false) {
-      const snaps = entries.map((e) => ({
-        meta: e.meta,
-        snap: e.scanner.scan(forceRefresh),
-      }));
-      const nextSig = snaps.map((x) => `${x.meta.id}:${x.snap.version}`).join("|");
-      if (lastMerged && !forceRefresh && nextSig === compositeSig) {
-        return lastMerged;
-      }
-      compositeSig = nextSig;
-      mergedVersion += 1;
-
-      const byConvId = new Map<string, ConversationDetail>();
-      let exists = false;
-      let summaryDbAvailable = false;
-      let conversationDbCount = 0;
-      let transcriptCount = 0;
-      let scanDurationMs = 0;
-      let sqliteReadMode: DataSourceHealth["sqliteReadMode"] = "none";
-      const warnings: string[] = [];
-
-      for (const { meta, snap } of snaps) {
-        if (snap.health.exists) exists = true;
-        if (snap.health.summaryDbAvailable) summaryDbAvailable = true;
-        conversationDbCount += snap.health.conversationDbCount;
-        transcriptCount += snap.health.transcriptCount;
-        scanDurationMs += snap.health.scanDurationMs;
-        if (snap.health.sqliteReadMode === "wal-readonly") {
-          sqliteReadMode = "wal-readonly";
-        } else if (sqliteReadMode === "none" && snap.health.sqliteReadMode === "immutable-fallback") {
-          sqliteReadMode = "immutable-fallback";
-        }
-        for (const w of snap.health.warnings) warnings.push(`[${meta.label}] ${w}`);
-        for (const c of snap.conversations) {
-          const tagged: ConversationDetail = {
-            ...c,
-            sourceId: meta.id,
-            sourceLabel: meta.label,
-          };
-          const prev = byConvId.get(c.conversationId);
-          if (!prev || isBetterConversationRecord(tagged, prev)) {
-            byConvId.set(c.conversationId, tagged);
-          }
-        }
-      }
-
-      lastMerged = {
-        conversations: [...byConvId.values()],
-        health: {
-          dataDir: `本机多账号合并 (${entries.length} 个数据源)`,
-          exists,
-          summaryDbAvailable,
-          conversationDbCount,
-          transcriptCount,
-          sqliteReadMode,
-          scanDurationMs,
-          scannedAt: new Date().toISOString(),
-          warnings,
-        },
-        version: mergedVersion,
-      };
-      return lastMerged;
-    },
-  };
+  return combineScanners(
+    entries.map((e) => ({ key: e.meta.id, scanner: e.scanner, tag: e.meta })),
+    `本机多账号合并 (${entries.length} 个数据源)`
+  );
 }
 
 /**

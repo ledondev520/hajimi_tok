@@ -12,6 +12,9 @@ import type {
   QuotaResetEvent,
   StepUsageRecord,
 } from "../src/types/telemetry";
+import { matchesModelQuery } from "../src/lib/models";
+
+export { matchesModelQuery };
 
 const FIVE_HOURS_MS = 5 * 3_600_000; // 官方短窗口：首条调用起 5 小时刷新周期（毫秒）
 const SEVEN_DAYS_MS = 7 * 86_400_000; // 官方长窗口：首条调用锚定 7 天周上限周期（毫秒）
@@ -123,37 +126,6 @@ export interface CycleBlock {
   endMs: number; // 周期重置终点毫秒时间戳
   totalTokens: number; // 落入该周期内的总消耗 Token
   isIdleReset: boolean; // 是否已过重置时刻处于满血待触发态
-}
-
-/**
- * 职责：判断模型名称或模型 ID 是否命中配额池（pool:claude / pool:gemini）或关键字过滤。
- * 思路：pool:claude 归并全部 Claude 系列（Opus / Sonnet / Haiku 等同池模型），pool:gemini 归并全部 Gemini 系列独立池，其余走子串匹配。
- * 参数：modelName — 可读模型名；modelId — 原始模型标识；query — 过滤词或池标识。
- * 返回值：命中返回 true，否则返回 false。
- */
-export function matchesModelQuery(modelName: string, modelId: string, query: string): boolean {
-  // 0. 归一化小写并识别双配额池前缀
-  const needle = query.trim().toLowerCase();
-  if (!needle) return true;
-  const hay = `${modelName} ${modelId}`.toLowerCase();
-  if (needle === "pool:claude") {
-    return (
-      hay.includes("claude") ||
-      hay.includes("opus") ||
-      hay.includes("sonnet") ||
-      hay.includes("haiku") ||
-      hay.includes("anthropic")
-    );
-  }
-  if (needle === "pool:gemini") {
-    return (
-      hay.includes("gemini") ||
-      hay.includes("argon") ||
-      hay.includes("carbon") ||
-      hay.includes("flash")
-    );
-  }
-  return hay.includes(needle);
 }
 
 /**

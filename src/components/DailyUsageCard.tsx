@@ -35,6 +35,7 @@ import {
   ChartFloatingTooltip,
   ChartLegendToggle,
   SvgAreaGradients,
+  SvgDayAxisOverlay,
   SvgGridAxes,
   useContainerWidth,
   usePersistedSet,
@@ -388,40 +389,6 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                 }
               />
 
-              {days.map((d, idx) => {
-                const x = toX(idx);
-                const isHovered = hoveredDayIdx === idx;
-                return (
-                  <g key={d.bucketKey}>
-                    <line
-                      x1={x}
-                      y1={PAD_TOP}
-                      x2={x}
-                      y2={PAD_TOP + plotH}
-                      strokeDasharray={isHovered ? "3 2" : undefined}
-                      strokeWidth={isHovered ? 1.4 : 1}
-                      className={
-                        isHovered
-                          ? "stroke-indigo-500/60 dark:stroke-indigo-400/60"
-                          : "stroke-slate-200/45 dark:stroke-slate-800/45"
-                      }
-                    />
-                    <text
-                      x={x}
-                      y={CHART_HEIGHT - 4}
-                      textAnchor="middle"
-                      className={
-                        d.isToday || isHovered
-                          ? "fill-indigo-600 font-mono text-[10px] font-bold dark:fill-indigo-400"
-                          : "fill-slate-400 font-mono text-[10px] dark:fill-slate-500"
-                      }
-                    >
-                      {d.label}
-                    </text>
-                  </g>
-                );
-              })}
-
               {showTokens &&
                 seriesList.map(({ fam, tokenArea, tokenLine }) => {
                   const gradId = `daily-dual-${fam.familyKey.replace(/[^a-z0-9]/gi, "-")}`;
@@ -507,25 +474,25 @@ export const DailyUsageCard = memo(function DailyUsageCard({
                   })
                 )}
 
-              {days.map((d, idx) => {
-                const x = toX(idx);
-                const sliceW = days.length <= 1 ? plotW : plotW / (days.length - 1);
-                return (
-                  <rect
-                    key={`hit-${d.bucketKey}`}
-                    x={Math.max(PAD_LEFT, x - sliceW / 2)}
-                    y={0}
-                    width={sliceW}
-                    height={CHART_HEIGHT}
-                    fill="transparent"
-                    className={d.isToday ? "cursor-pointer" : "cursor-crosshair"}
-                    onMouseEnter={() => setHoveredDayIdx(idx)}
-                    onClick={() => {
-                      if (d.isToday) setGranularity("today");
-                    }}
-                  />
-                );
-              })}
+              <SvgDayAxisOverlay
+                days={days}
+                toX={toX}
+                padLeft={PAD_LEFT}
+                padRight={PAD_RIGHT}
+                padTop={PAD_TOP}
+                plotW={plotW}
+                plotH={plotH}
+                chartHeight={CHART_HEIGHT}
+                svgWidth={svgWidth}
+                hoveredIdx={hoveredDayIdx}
+                onHoverIdx={setHoveredDayIdx}
+                onClickDay={(d) => {
+                  if (d.isToday) setGranularity("today");
+                }}
+                hoverLineClassName="stroke-indigo-500/60 dark:stroke-indigo-400/60"
+                todayLabelClassName="fill-indigo-600 font-mono text-[10px] font-bold dark:fill-indigo-400"
+                highlightHoveredLabel
+              />
             </svg>
 
             {hoveredDay && (

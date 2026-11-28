@@ -38,6 +38,7 @@ import {
   ChartLegendToggle,
   formatPercentTick,
   SvgAreaGradients,
+  SvgDayAxisOverlay,
   SvgGridAxes,
   useContainerWidth,
   usePersistedSet,
@@ -349,40 +350,6 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
                 formatLeftLabel={(ratio) => formatPercentTick(minY + ySpan * ratio)}
               />
 
-              {days.map((d, idx) => {
-                const x = toX(idx);
-                const isHovered = hoveredDayIdx === idx;
-                return (
-                  <g key={d.bucketKey}>
-                    <line
-                      x1={x}
-                      y1={PAD_TOP}
-                      x2={x}
-                      y2={PAD_TOP + plotH}
-                      strokeDasharray={isHovered ? "3 2" : undefined}
-                      strokeWidth={isHovered ? 1.4 : 1}
-                      className={
-                        isHovered
-                          ? "stroke-emerald-500/60 dark:stroke-emerald-400/60"
-                          : "stroke-slate-200/45 dark:stroke-slate-800/45"
-                      }
-                    />
-                    <text
-                      x={x}
-                      y={CHART_HEIGHT - 4}
-                      textAnchor="middle"
-                      className={
-                        d.isToday
-                          ? "fill-emerald-600 font-mono text-[10px] font-semibold dark:fill-emerald-400"
-                          : "fill-slate-400 font-mono text-[10px] dark:fill-slate-500"
-                      }
-                    >
-                      {d.isToday ? "今日" : d.label}
-                    </text>
-                  </g>
-                );
-              })}
-
               {overallArea && <path d={overallArea} fill="url(#cache-rate-overall-grad)" />}
               {overallLine && (
                 <path
@@ -433,25 +400,22 @@ export const CacheHitRateCard = memo(function CacheHitRateCard({
                 />
               ))}
 
-              {days.map((d, idx) => {
-                const colW = days.length <= 1 ? plotW : plotW / Math.max(1, days.length - 1);
-                const xStart =
-                  days.length <= 1 ? PAD_LEFT : Math.max(PAD_LEFT, toX(idx) - colW / 2);
-                const xEnd =
-                  days.length <= 1 ? PAD_LEFT + plotW : Math.min(svgWidth - PAD_RIGHT, toX(idx) + colW / 2);
-                return (
-                  <rect
-                    key={`hit-${d.bucketKey}`}
-                    x={xStart}
-                    y={0}
-                    width={Math.max(12, xEnd - xStart)}
-                    height={CHART_HEIGHT}
-                    fill="transparent"
-                    className="cursor-crosshair"
-                    onMouseEnter={() => setHoveredDayIdx(idx)}
-                  />
-                );
-              })}
+              <SvgDayAxisOverlay
+                days={days}
+                toX={toX}
+                padLeft={PAD_LEFT}
+                padRight={PAD_RIGHT}
+                padTop={PAD_TOP}
+                plotW={plotW}
+                plotH={plotH}
+                chartHeight={CHART_HEIGHT}
+                svgWidth={svgWidth}
+                hoveredIdx={hoveredDayIdx}
+                onHoverIdx={setHoveredDayIdx}
+                hoverLineClassName="stroke-emerald-500/60 dark:stroke-emerald-400/60"
+                todayLabelClassName="fill-emerald-600 font-mono text-[10px] font-semibold dark:fill-emerald-400"
+                formatDayLabel={(d) => (d.isToday ? "今日" : d.label)}
+              />
             </svg>
 
             {hoveredDay && (

@@ -27,6 +27,25 @@ interface StoredLocalResetEvent extends QuotaResetEvent {
   dismissed?: boolean;
 }
 
+/** 严格读取并解析 JSON 文件（文件损坏时抛带路径的清晰错误以阻断误覆盖） */
+function readJsonFileStrict(filePath: string, label: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    throw new Error(
+      `${label}已损坏或不可读，已阻止覆盖以保留原件 (${filePath}): ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/** 原子落盘 JSON 文件（先写同目录随机临时文件再 rename 替换，杜绝半写损坏） */
+function writeJsonFileAtomic(filePath: string, payload: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
 /**
  * 职责：解析用户重置记录 JSON 文件的落盘路径（优先环境变量 AGY_RESETS_FILE，默认 ~/.hamiji-sta/resets.json）。
  * 参数：customPath — 可选显式路径（供单测隔离）。
@@ -105,14 +124,7 @@ export function createResetStore(customPath?: string | null, customSharedPath?: 
 
   const readLocalStrict = (): StoredLocalResetEvent[] => {
     if (!filePath || !fs.existsSync(filePath)) return [];
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch (err) {
-      throw new Error(
-        `本地重置记录文件已损坏或不可读，已阻止覆盖以保留原件 (${filePath}): ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    const parsed = readJsonFileStrict(filePath, "本地重置记录文件");
     if (!Array.isArray(parsed)) {
       throw new Error(`本地重置记录文件格式损坏（非数组），已阻止覆盖以保留原件 (${filePath})`);
     }
@@ -176,10 +188,7 @@ export function createResetStore(customPath?: string | null, customSharedPath?: 
   const writeLocalRaw = (list: StoredLocalResetEvent[]): QuotaResetEvent[] => {
     if (!filePath) throw new Error("只读公共重置存储不支持本地写入");
     const normalized = normalizeResetList(list, true);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf8");
-    fs.renameSync(tmp, filePath);
+    writeJsonFileAtomic(filePath, normalized);
     return mergeAll(normalized);
   };
 
@@ -349,14 +358,7 @@ export function createCalibrationStore(customPath?: string) {
     deletedAt: Record<string, string>;
   } => {
     if (!fs.existsSync(filePath)) return { entries: {}, deletedAt: {} };
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch (err) {
-      throw new Error(
-        `本地周校准文件已损坏或不可读，已阻止覆盖以保留原件 (${filePath}): ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    const parsed = readJsonFileStrict(filePath, "本地周校准文件");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error(`本地周校准文件格式损坏（非 JSON 对象），已阻止覆盖以保留原件 (${filePath})`);
     }
@@ -400,10 +402,7 @@ export function createCalibrationStore(customPath?: string) {
     if (Object.keys(deletedAt).length > 0) {
       payload[CALIBRATION_TOMBSTONE_KEY] = deletedAt;
     }
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString("hex")}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
-    fs.renameSync(tmp, filePath);
+    writeJsonFileAtomic(filePath, payload);
     return normalized;
   };
 

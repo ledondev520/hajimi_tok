@@ -20,7 +20,7 @@ import {
 } from "@/lib/format";
 import { groupByMainConversation, type MainConversationGroup } from "@/lib/conversationGroups";
 import { formatCompactGap, resolveLiveCacheWarmth } from "@/lib/cacheTtl";
-import { resolveModelStyle } from "@/components/ModelCallChart";
+import { resolveModelStyle, stripModelBrandPrefix } from "@/lib/models";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,9 +42,7 @@ import {
 
 export { groupByMainConversation, type MainConversationGroup };
 
-/** 精简表格主模型列显示名称（剥离冗长的 Gemini 4 前缀，窄屏一眼分辨具体子型号） */
-const compactModelName = (name: string): string =>
-  (name || "Unknown").replace(/^Gemini\s+4\s+/i, "").trim() || "Unknown";
+const compactModelName = stripModelBrandPrefix;
 
 /** 会话列表表头点击排序维度枚举 */
 type SortByKey = "recent" | "tokens" | "cost" | "calls" | "cacheRate";

@@ -23,7 +23,7 @@ import {
   formatCompactGap,
   type StepCacheTtlAnnotation,
 } from "@/lib/cacheTtl";
-import { resolveModelStyle } from "@/components/ModelCallChart";
+import { resolveModelStyle, stripModelBrandPrefix } from "@/lib/models";
 import {
   buildAreaPath,
   buildLinePath,
@@ -525,7 +525,7 @@ export function ConversationDetailDialog({
                       {formatUsd(detail.estimatedCostUsd)}
                     </strong>
                     <span className="ml-1 text-slate-400">
-                      {detail.primaryModel.replace(/^Claude\s+|^Gemini\s+4\s+/i, "")}
+                      {stripModelBrandPrefix(detail.primaryModel)}
                     </span>
                   </span>
                 </div>

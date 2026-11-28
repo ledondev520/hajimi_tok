@@ -21,6 +21,7 @@ import {
   buildResetCalendarItems,
   formatCycleCountdown,
   formatDateTime,
+  toLocalDayKey,
   type ResetCalendarItem,
 } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -47,13 +48,7 @@ const POOL_LABEL: Record<QuotaResetEvent["pool"], string> = {
 /** 将 Date 对象格式化为 datetime-local 输入框所需的 YYYY-MM-DDTHH:mm 本地文本 */
 function toDatetimeLocalValue(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** 将 Date 对象格式化为本地 YYYY-MM-DD 键 */
-function toDayKey(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${toLocalDayKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /**
@@ -201,7 +196,7 @@ export function ResetCalendarPage() {
   }, [calendarItems]);
 
   // 1.2. 构造当前月的 6×7 或 5×7 日期格子（周一作为第一列）
-  const todayKey = toDayKey(new Date());
+  const todayKey = toLocalDayKey(new Date());
   const monthCells = useMemo(() => {
     const firstDay = new Date(viewYear, viewMonth, 1);
     const startOffset = (firstDay.getDay() + 6) % 7; // 周一=0 .. 周日=6
@@ -212,7 +207,7 @@ export function ResetCalendarPage() {
       const d = new Date(viewYear, viewMonth, 1 - startOffset + i);
       cells.push({
         date: d,
-        dayKey: toDayKey(d),
+        dayKey: toLocalDayKey(d),
         inMonth: d.getMonth() === viewMonth,
       });
     }

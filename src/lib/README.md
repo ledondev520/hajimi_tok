@@ -1,6 +1,7 @@
 若本文件夹结构或内容变化，请更新本文件。
 
 - `utils.ts`｜`cn()` Tailwind 类名合并
+- `models.ts`｜前后端共用的模型池判定（Claude / Gemini / 其他）、模型过滤匹配、紧凑短名与固定视觉配色解析
 - `format.ts`｜数值/时间格式化、今日摘要提取、周满额反算与重置日历生成
 - `useWeeklyCalibration.ts`｜周配额剩余 `%` 同步、官方 `statusLine` 回填与防抖写回 Hook
 - `cacheTtl.ts`｜前后端共享的实测缓存 TTL 衰减、压缩剔除与热冷态推算

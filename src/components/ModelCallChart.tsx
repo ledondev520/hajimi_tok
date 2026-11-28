@@ -17,6 +17,7 @@ import {
   formatTokens,
   formatUsd,
 } from "@/lib/format";
+import { resolveModelStyle, type ModelSeriesStyle } from "@/lib/models";
 import {
   buildAreaPath,
   buildLinePath,
@@ -37,16 +38,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+export { resolveModelStyle };
 export type NodeWindowKey = "60" | "150" | "all";
-
-interface ModelSeriesStyle {
-  familyKey: string;
-  shortLabel: string;
-  color: string;
-  poolTokens: number;
-  avgTps: number;
-  avgCacheHitRate?: number;
-}
 
 export interface ModelCallChartProps {
   nodes: CallNodePoint[];
@@ -68,55 +61,6 @@ const PAD_LEFT = 48;
 const PAD_RIGHT = 14;
 const PAD_TOP = 12;
 const PAD_BOTTOM = 22;
-const FALLBACK_COLORS = ["#6366f1", "#0ea5e9", "#14b8a6", "#f97316"];
-
-/** 将原始模型全称提炼为紧凑家族键、图例短名与固定配色（明确区分 Argon / Carbon / Neon / Hydrogen） */
-export function resolveModelStyle(modelName: string, fallbackIndex: number): ModelSeriesStyle {
-  const base = (modelName || "Unknown").replace(/\s*\([^)]*\)\s*$/g, "").trim();
-  const lower = base.toLowerCase();
-
-  if (lower.includes("opus")) {
-    const shortLabel = base.replace(/^claude\s+/i, "").trim();
-    return { familyKey: shortLabel.toLowerCase(), shortLabel, color: "#8b5cf6", poolTokens: 0, avgTps: 0 };
-  }
-  if (lower.includes("sonnet")) {
-    const shortLabel = base.replace(/^claude\s+/i, "").trim();
-    return { familyKey: shortLabel.toLowerCase(), shortLabel, color: "#f59e0b", poolTokens: 0, avgTps: 0 };
-  }
-  if (lower.includes("haiku")) {
-    const shortLabel = base.replace(/^claude\s+/i, "").trim();
-    return { familyKey: shortLabel.toLowerCase(), shortLabel, color: "#ec4899", poolTokens: 0, avgTps: 0 };
-  }
-  if (
-    lower.includes("gemini") ||
-    lower.includes("argon") ||
-    lower.includes("carbon") ||
-    lower.includes("neon") ||
-    lower.includes("hydrogen")
-  ) {
-    const shortLabel = lower.includes("flash")
-      ? "Flash"
-      : base.replace(/^gemini\s+\d+(?:\.\d+)?\s+/i, "").trim() || base;
-    const color = lower.includes("carbon")
-      ? "#0ea5e9"
-      : lower.includes("argon")
-        ? "#10b981"
-        : lower.includes("neon")
-          ? "#14b8a6"
-          : lower.includes("hydrogen")
-            ? "#6366f1"
-            : "#06b6d4";
-    return { familyKey: shortLabel.toLowerCase(), shortLabel, color, poolTokens: 0, avgTps: 0 };
-  }
-
-  return {
-    familyKey: lower || "unknown",
-    shortLabel: base || "Unknown",
-    color: FALLBACK_COLORS[fallbackIndex % FALLBACK_COLORS.length],
-    poolTokens: 0,
-    avgTps: 0,
-  };
-}
 
 export const ModelCallChart = memo(function ModelCallChart({
   nodes,

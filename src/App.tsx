@@ -18,6 +18,7 @@ import {
   readStoredJson,
   writeStoredJson,
 } from "@/lib/format";
+import { resolveModelPool, stripModelReasoningSuffix } from "@/lib/models";
 import { CacheHitRateCard } from "@/components/CacheHitRateCard";
 import { DailyUsageCard } from "@/components/DailyUsageCard";
 import { KpiCards } from "@/components/KpiCards";
@@ -81,24 +82,14 @@ export function buildModelShortcuts(availableModels: string[]): ModelShortcutIte
   const otherFamilies = new Map<string, string>();
 
   for (const raw of availableModels) {
-    const base = raw.replace(/\s*\([^)]*\)\s*$/g, "").trim();
+    const base = stripModelReasoningSuffix(raw);
     const lower = base.toLowerCase();
     if (!base || lower === "unknown model" || lower.includes("gpt-oss")) continue;
 
-    if (
-      lower.includes("claude") ||
-      lower.includes("opus") ||
-      lower.includes("sonnet") ||
-      lower.includes("haiku") ||
-      lower.includes("anthropic")
-    ) {
+    const pool = resolveModelPool(lower);
+    if (pool === "claude") {
       claudeModels.add(base.replace(/^claude\s+/i, "").trim());
-    } else if (
-      lower.includes("gemini") ||
-      lower.includes("argon") ||
-      lower.includes("carbon") ||
-      lower.includes("flash")
-    ) {
+    } else if (pool === "gemini") {
       geminiModels.add(base);
     } else if (!otherFamilies.has(lower)) {
       otherFamilies.set(lower, base);

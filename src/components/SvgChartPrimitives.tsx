@@ -331,3 +331,95 @@ export function ChartEmptyBox({ message, height = 152 }: { message: string; heig
     </div>
   );
 }
+
+/** 按日折线图共用的 X 轴纵线、自然日刻度标签与整列透明悬停热区 */
+export function SvgDayAxisOverlay({
+  days,
+  toX,
+  padLeft,
+  padRight,
+  padTop,
+  plotW,
+  plotH,
+  chartHeight,
+  svgWidth,
+  hoveredIdx,
+  onHoverIdx,
+  onClickDay,
+  hoverLineClassName,
+  todayLabelClassName,
+  formatDayLabel,
+  highlightHoveredLabel = false,
+}: {
+  days: ReadonlyArray<{ bucketKey: string; label: string; isToday: boolean }>;
+  toX: (idx: number) => number;
+  padLeft: number;
+  padRight: number;
+  padTop: number;
+  plotW: number;
+  plotH: number;
+  chartHeight: number;
+  svgWidth: number;
+  hoveredIdx: number | null;
+  onHoverIdx: (idx: number) => void;
+  onClickDay?: (day: { bucketKey: string; label: string; isToday: boolean }, idx: number) => void;
+  hoverLineClassName: string;
+  todayLabelClassName: string;
+  formatDayLabel?: (day: { bucketKey: string; label: string; isToday: boolean }) => string;
+  highlightHoveredLabel?: boolean;
+}) {
+  return (
+    <>
+      {days.map((d, idx) => {
+        const x = toX(idx);
+        const isHovered = hoveredIdx === idx;
+        return (
+          <g key={d.bucketKey}>
+            <line
+              x1={x}
+              y1={padTop}
+              x2={x}
+              y2={padTop + plotH}
+              strokeDasharray={isHovered ? "3 2" : undefined}
+              strokeWidth={isHovered ? 1.4 : 1}
+              className={
+                isHovered ? hoverLineClassName : "stroke-slate-200/45 dark:stroke-slate-800/45"
+              }
+            />
+            <text
+              x={x}
+              y={chartHeight - 4}
+              textAnchor="middle"
+              className={
+                d.isToday || (highlightHoveredLabel && isHovered)
+                  ? todayLabelClassName
+                  : "fill-slate-400 font-mono text-[10px] dark:fill-slate-500"
+              }
+            >
+              {formatDayLabel ? formatDayLabel(d) : d.label}
+            </text>
+          </g>
+        );
+      })}
+      {days.map((d, idx) => {
+        const colW = days.length <= 1 ? plotW : plotW / Math.max(1, days.length - 1);
+        const xStart = days.length <= 1 ? padLeft : Math.max(padLeft, toX(idx) - colW / 2);
+        const xEnd =
+          days.length <= 1 ? padLeft + plotW : Math.min(svgWidth - padRight, toX(idx) + colW / 2);
+        return (
+          <rect
+            key={`hit-${d.bucketKey}`}
+            x={xStart}
+            y={0}
+            width={Math.max(12, xEnd - xStart)}
+            height={chartHeight}
+            fill="transparent"
+            className={onClickDay && d.isToday ? "cursor-pointer" : "cursor-crosshair"}
+            onMouseEnter={() => onHoverIdx(idx)}
+            onClick={onClickDay ? () => onClickDay(d, idx) : undefined}
+          />
+        );
+      })}
+    </>
+  );
+}

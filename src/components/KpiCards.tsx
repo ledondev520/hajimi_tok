@@ -1,10 +1,10 @@
 /**
- * Input: GlobalKpiTotals 与 ModelUsageBreakdown 类型、@/lib/format 格式化与周配额反算工具、@/components/ModelCallChart 模型配色解析器与 @/components/ui 基础组件。
- * Output: 导出 KpiCards 顶部单行四列紧凑型核心遥测指标卡片组件（第 4 卡支持按模型家族/档位拆解等效 API 成本及输入官方周剩余%反算周满额金额与总 Token）。
+ * Input: GlobalKpiTotals 与 ModelUsageBreakdown 类型、@/lib/format 工具、@/lib/models 配色解析、useWeeklyCalibration 与 @/components/ui 组件。
+ * Output: 导出 KpiCards 顶部单行四列紧凑型核心遥测指标卡片组件（支持 390px 双列不裁切及周剩余%满额反算）。
  * Pos: 看板首屏紧凑 KPI 概览层，单行并排展示四张高信息密度卡片（src/components/KpiCards.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { BrainCircuit, Coins, Info, Layers, Zap } from "lucide-react";
 import type {
   GlobalKpiTotals,
@@ -20,28 +20,93 @@ import {
   formatTokens,
   formatUsd,
 } from "@/lib/format";
+import { resolveModelStyle, stripModelBrandPrefix } from "@/lib/models";
 import { useWeeklyCalibration } from "@/lib/useWeeklyCalibration";
-import { resolveModelStyle } from "@/components/ModelCallChart";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
-/** KpiCards 组件入参属性 */
 export interface KpiCardsProps {
-  totals: GlobalKpiTotals; // 全局聚合核心指标
-  byModel?: ModelUsageBreakdown[]; // 按模型拆解的 Token 与等效 API 成本列表
-  mainConversationCount: number; // 合并子代理后的顶层主会话数量
-  activeModelLabel?: string; // 当前快捷选中的模型名称（为空表示全部模型）
-  activePoolKey?: string; // 当前快捷选中的模型/配额池键（用于独立持久化周配额校准）
-  quotaWindow?: QuotaCycleInfo; // 当前配额池的 5h/7d 周期窗口摘要
-  liveQuota?: LivePoolQuotaSnapshot; // 可选：由 agy 官方 statusLine 桥接同步的实时官方周剩余
-  isWorkspaceFiltered?: boolean; // 是否处于单一工作区筛选视图（禁止写回整池周校准）
-  activeSource?: string; // 当前激活的数据源 ID（多账号场景下用于隔离周校准存储）
+  totals: GlobalKpiTotals;
+  byModel?: ModelUsageBreakdown[];
+  mainConversationCount: number;
+  activeModelLabel?: string;
+  activePoolKey?: string;
+  quotaWindow?: QuotaCycleInfo;
+  liveQuota?: LivePoolQuotaSnapshot;
+  isWorkspaceFiltered?: boolean;
+  activeSource?: string;
+}
+
+/** 四张 KPI 卡片共用的统一外壳（顶部标题行 + 自适应换行主值与徽章 + 比例进度条 + 底栏明细） */
+function KpiCardShell({
+  title,
+  icon,
+  headline,
+  badge,
+  bar,
+  footer,
+  extra,
+}: {
+  title: ReactNode;
+  icon: ReactNode;
+  headline: ReactNode;
+  badge: ReactNode;
+  bar: ReactNode;
+  footer: ReactNode;
+  extra?: ReactNode;
+}) {
+  return (
+    <Card className="min-w-0 gap-0 overflow-hidden border-slate-200/80 bg-white py-2 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
+      <CardContent className="space-y-1 px-3">
+        <div className="flex items-center justify-between gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+          {title}
+          {icon}
+        </div>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
+          {headline}
+          {badge}
+        </div>
+        {bar}
+        {footer}
+        {extra}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 分模型等效成本悬停拆解行列表（供第 4 卡标题问号与底栏共用） */
+function ModelCostBreakdownRows({
+  slices,
+  totalCostUsd,
+  showTokens,
+}: {
+  slices: ModelUsageBreakdown[];
+  totalCostUsd: number;
+  showTokens?: boolean;
+}) {
+  return (
+    <div className="space-y-1">
+      {slices.map((m, idx) => {
+        const st = resolveModelStyle(m.modelName, idx);
+        const pct = totalCostUsd > 0 ? (m.estimatedCostUsd / totalCostUsd) * 100 : 0;
+        return (
+          <div key={m.modelName} className="flex items-center justify-between gap-3 text-[11px] tabular-nums">
+            <span className="inline-flex items-center gap-1.5">
+              <span style={{ backgroundColor: st.color }} className="inline-block size-1.5 shrink-0 rounded-full" />
+              <span>{m.modelName}</span>
+            </span>
+            <span className="shrink-0 font-mono">
+              {showTokens
+                ? `${formatUsd(m.estimatedCostUsd)} · ${formatTokens(m.totalTokens)}`
+                : `${formatUsd(m.estimatedCostUsd)} (${pct.toFixed(0)}%)`}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export const KpiCards = memo(function KpiCards({
@@ -73,17 +138,15 @@ export const KpiCards = memo(function KpiCards({
     activeSource,
   });
 
-  // 0.1. 计算输入/缓存/输出占比与思考占比，防止除零
-  const safeTotal = Math.max(1, totals.totalTokens); // 总量安全分母
-  const inputPct = (totals.inputTokens / safeTotal) * 100; // 新增输入占比
-  const cachePct = (totals.cacheReadTokens / safeTotal) * 100; // 缓存读取占比
-  const outputPct = (totals.outputTokens / safeTotal) * 100; // 输出占比
+  const safeTotal = Math.max(1, totals.totalTokens);
+  const inputPct = (totals.inputTokens / safeTotal) * 100;
+  const cachePct = (totals.cacheReadTokens / safeTotal) * 100;
+  const outputPct = (totals.outputTokens / safeTotal) * 100;
 
-  const safeOut = Math.max(1, totals.outputTokens); // 输出安全分母
-  const thinkingPct = (totals.thinkingTokens / safeOut) * 100; // 思考占输出比例
-  const responsePct = Math.max(0, 100 - thinkingPct); // 回复占输出比例
+  const safeOut = Math.max(1, totals.outputTokens);
+  const thinkingPct = (totals.thinkingTokens / safeOut) * 100;
+  const responsePct = Math.max(0, 100 - thinkingPct);
 
-  // 0.1. 按模型家族归并等效 API 成本（如 Gemini 4 Argon vs Gemini 4 Carbon vs Opus 5.5）
   const familyCostMap = new Map<
     string,
     { familyKey: string; label: string; compactLabel: string; color: string; costUsd: number; tokens: number; calls: number }
@@ -91,9 +154,7 @@ export const KpiCards = memo(function KpiCards({
   byModel.forEach((m, idx) => {
     const style = resolveModelStyle(m.modelName, idx);
     const cur = familyCostMap.get(style.familyKey);
-    const compactLabel = style.shortLabel
-      .replace(/^Gemini\s+(4\s+)?/i, "")
-      .replace(/\s+\d+(\.\d+)?$/i, "");
+    const compactLabel = style.shortLabel.replace(/^Gemini\s+(4\s+)?/i, "").replace(/\s+\d+(\.\d+)?$/i, "");
     if (cur) {
       cur.costUsd += m.estimatedCostUsd;
       cur.tokens += m.totalTokens;
@@ -112,12 +173,11 @@ export const KpiCards = memo(function KpiCards({
   });
   const familyCostSlices = [...familyCostMap.values()].sort((a, b) => b.costUsd - a.costUsd);
   const rawModelCostSlices = [...byModel].sort((a, b) => b.estimatedCostUsd - a.estimatedCostUsd);
-  // 若当前池仅含单一家族但存在多个推理档位（如 Claude 池内 Medium / High），底栏直接按具体档位拆解
   const displayCostItems =
     familyCostSlices.length === 1 && rawModelCostSlices.length > 1
       ? rawModelCostSlices.map((m, idx) => ({
           key: m.modelName,
-          label: m.modelName.replace(/^Claude\s+|^Gemini\s+4\s+/i, ""),
+          label: stripModelBrandPrefix(m.modelName),
           color: idx === 0 ? familyCostSlices[0].color : "#6366f1",
           costUsd: m.estimatedCostUsd,
         }))
@@ -128,167 +188,145 @@ export const KpiCards = memo(function KpiCards({
           costUsd: f.costUsd,
         }));
   const safeCostTotal = Math.max(0.000001, totals.estimatedCostUsd);
+  const cacheRatePct = Math.min(100, Math.max(0, totals.cacheHitRate * 100));
 
-  // 1.1. 渲染宽屏一行四列、分屏/窄窗两列两行的高密度卡片网格（全卡 min-w-0 overflow-hidden 杜绝穿模）
   return (
-    <section
-      aria-label="核心 Token 消耗指标概览"
-      className="grid grid-cols-2 gap-2.5 lg:grid-cols-4"
-    >
-      {/* Card 1: 总消耗 Token（同步对照 5h 短周期与 7d 周周期） */}
-      <Card className="min-w-0 gap-0 overflow-hidden border-slate-200/80 bg-white py-2 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-        <CardContent className="space-y-1 px-3">
-          <div className="flex items-center justify-between gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            <span className="truncate">
-              {activeModelLabel ? `${activeModelLabel}消耗` : "总消耗"}
-            </span>
-            <Layers className="size-3.5 shrink-0 text-indigo-500" />
-          </div>
-
-          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
+    <section aria-label="核心 Token 消耗指标概览" className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+      <KpiCardShell
+        title={<span className="truncate">{activeModelLabel ? `${activeModelLabel}消耗` : "总消耗"}</span>}
+        icon={<Layers className="size-3.5 shrink-0 text-indigo-500" />}
+        headline={
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="cursor-default text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
+                {formatTokens(totals.totalTokens)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>精确总计: {formatExactNumber(totals.totalTokens)} tokens</TooltipContent>
+          </Tooltip>
+        }
+        badge={
+          quotaWindow ? (
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="cursor-default text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
-                  {formatTokens(totals.totalTokens)}
-                </span>
+                <Badge
+                  variant="secondary"
+                  className="h-4 max-w-full cursor-default border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
+                >
+                  {quotaWindow.mode === "5h" || quotaWindow.mode === "prev-5h"
+                    ? `7d周池 ${formatTokens(quotaWindow.active7dTokens)}`
+                    : `本轮5h ${formatTokens(quotaWindow.active5hTokens)}`}
+                </Badge>
               </TooltipTrigger>
               <TooltipContent>
-                精确总计: {formatExactNumber(totals.totalTokens)} tokens
+                {quotaWindow.mode === "5h" || quotaWindow.mode === "prev-5h"
+                  ? `当前 7d 周周期累计 ${formatTokens(quotaWindow.active7dTokens)}${
+                      quotaWindow.active7dResetsAt
+                        ? `（预计 ${formatDateTime(quotaWindow.active7dResetsAt).slice(0, 11)} 重置）`
+                        : "（待触发）"
+                    }`
+                  : `当前 5h 周期累计 ${formatTokens(quotaWindow.active5hTokens)}${
+                      quotaWindow.active5hResetsAt
+                        ? `（预计 ${formatDateTime(quotaWindow.active5hResetsAt).slice(0, 11)} 重置）`
+                        : "（已满血重置待触发）"
+                    }`}
               </TooltipContent>
             </Tooltip>
-            {quotaWindow ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Badge
-                    variant="secondary"
-                    className="h-4 max-w-full cursor-default border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
-                  >
-                    {quotaWindow.mode === "5h" || quotaWindow.mode === "prev-5h"
-                      ? `7d周池 ${formatTokens(quotaWindow.active7dTokens)}`
-                      : `本轮5h ${formatTokens(quotaWindow.active5hTokens)}`}
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {quotaWindow.mode === "5h" || quotaWindow.mode === "prev-5h"
-                    ? `当前 7d 周周期累计 ${formatTokens(quotaWindow.active7dTokens)}${
-                        quotaWindow.active7dResetsAt
-                          ? `（预计 ${formatDateTime(quotaWindow.active7dResetsAt).slice(0, 11)} 重置）`
-                          : "（待触发）"
-                      }`
-                    : `当前 5h 周期累计 ${formatTokens(quotaWindow.active5hTokens)}${
-                        quotaWindow.active5hResetsAt
-                          ? `（预计 ${formatDateTime(quotaWindow.active5hResetsAt).slice(0, 11)} 重置）`
-                          : "（已满血重置待触发）"
-                      }`}
-                </TooltipContent>
-              </Tooltip>
-            ) : (
-              <Badge
-                variant="secondary"
-                className="h-4 max-w-full border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
-              >
-                今日 {formatTokens(totals.todayTotalTokens)}
-              </Badge>
-            )}
-          </div>
-
+          ) : (
+            <Badge
+              variant="secondary"
+              className="h-4 max-w-full border border-indigo-500/20 bg-indigo-500/10 px-1.5 text-[10px] text-indigo-700 tabular-nums dark:bg-indigo-500/15 dark:text-indigo-300"
+            >
+              今日 {formatTokens(totals.todayTotalTokens)}
+            </Badge>
+          )
+        }
+        bar={
           <div className="flex h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
             <div style={{ width: `${cachePct}%` }} className="bg-emerald-500" />
             <div style={{ width: `${inputPct}%` }} className="bg-indigo-500" />
             <div style={{ width: `${outputPct}%` }} className="bg-amber-500" />
           </div>
-
+        }
+        footer={
           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
             <span>缓 {formatTokens(totals.cacheReadTokens)}</span>
             <span>新 {formatTokens(totals.inputTokens)}</span>
             <span>出 {formatTokens(totals.outputTokens)}</span>
           </div>
-        </CardContent>
-      </Card>
+        }
+      />
 
-      {/* Card 2: Prompt 缓存命中率 */}
-      <Card className="min-w-0 gap-0 overflow-hidden border-slate-200/80 bg-white py-2 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-        <CardContent className="space-y-1 px-3">
-          <div className="flex items-center justify-between gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            <span className="truncate">缓存命中</span>
-            <Zap className="size-3.5 shrink-0 text-emerald-500" />
-          </div>
-
-          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
-            <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
-              {formatPercent(totals.cacheHitRate)}
-            </span>
-            <Badge
-              variant="secondary"
-              className="h-4 max-w-full border border-emerald-500/20 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 tabular-nums dark:bg-emerald-500/15 dark:text-emerald-300"
-            >
-              省 {formatUsd(totals.cacheSavedUsd)}
-            </Badge>
-          </div>
-
+      <KpiCardShell
+        title={<span className="truncate">缓存命中</span>}
+        icon={<Zap className="size-3.5 shrink-0 text-emerald-500" />}
+        headline={
+          <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
+            {formatPercent(totals.cacheHitRate)}
+          </span>
+        }
+        badge={
+          <Badge
+            variant="secondary"
+            className="h-4 max-w-full border border-emerald-500/20 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-700 tabular-nums dark:bg-emerald-500/15 dark:text-emerald-300"
+          >
+            省 {formatUsd(totals.cacheSavedUsd)}
+          </Badge>
+        }
+        bar={
           <div
             role="progressbar"
             aria-label="全局 Prompt 缓存命中率"
-            aria-valuenow={Math.round(Math.min(100, Math.max(0, totals.cacheHitRate * 100)))}
+            aria-valuenow={Math.round(cacheRatePct)}
             aria-valuemin={0}
             aria-valuemax={100}
             className="flex h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
           >
-            <div
-              style={{ width: `${Math.min(100, Math.max(0, totals.cacheHitRate * 100))}%` }}
-              className="bg-emerald-500 transition-all"
-            />
+            <div style={{ width: `${cacheRatePct}%` }} className="bg-emerald-500 transition-all" />
           </div>
-
+        }
+        footer={
           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
             <span>缓存 {formatTokens(totals.cacheReadTokens)}</span>
             <span>新输入 {formatTokens(totals.inputTokens)}</span>
           </div>
-        </CardContent>
-      </Card>
+        }
+      />
 
-      {/* Card 3: 输出与思考拆解及 TPS 速率 */}
-      <Card className="min-w-0 gap-0 overflow-hidden border-slate-200/80 bg-white py-2 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-        <CardContent className="space-y-1 px-3">
-          <div className="flex items-center justify-between gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            <span className="truncate">输出与速率</span>
-            <BrainCircuit className="size-3.5 shrink-0 text-violet-500" />
-          </div>
-
-          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
-            <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
-              {formatTokens(totals.outputTokens)}
-            </span>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge
-                  variant="outline"
-                  className="h-4 cursor-default border-violet-500/30 px-1.5 text-[10px] text-violet-700 tabular-nums dark:text-violet-300"
-                >
-                  {totals.avgOutputTps > 0
-                    ? `${totals.avgOutputTps.toFixed(1)} tok/s`
-                    : `思考 ${totals.outputTokens > 0 ? `${thinkingPct.toFixed(0)}%` : "0%"}`}
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-xs">
+      <KpiCardShell
+        title={<span className="truncate">输出与速率</span>}
+        icon={<BrainCircuit className="size-3.5 shrink-0 text-violet-500" />}
+        headline={
+          <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
+            {formatTokens(totals.outputTokens)}
+          </span>
+        }
+        badge={
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge
+                variant="outline"
+                className="h-4 cursor-default border-violet-500/30 px-1.5 text-[10px] text-violet-700 tabular-nums dark:text-violet-300"
+              >
                 {totals.avgOutputTps > 0
-                  ? `端到端有效 TPS：${totals.avgOutputTps.toFixed(1)} tok/s（含均首包等待 ${formatDurationMs(totals.avgTtftMs)}${totals.avgStreamingTps > 0 ? ` · 扣首包纯吐字 ${totals.avgStreamingTps.toFixed(1)} tok/s` : ""}）`
-                  : "暂无已完成耗时记录，待模型落盘 gen_metadata 后自动计算 TPS"}
-              </TooltipContent>
-            </Tooltip>
-          </div>
-
+                  ? `${totals.avgOutputTps.toFixed(1)} tok/s`
+                  : `思考 ${totals.outputTokens > 0 ? `${thinkingPct.toFixed(0)}%` : "0%"}`}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              {totals.avgOutputTps > 0
+                ? `端到端有效 TPS：${totals.avgOutputTps.toFixed(1)} tok/s（含均首包等待 ${formatDurationMs(totals.avgTtftMs)}${totals.avgStreamingTps > 0 ? ` · 扣首包纯吐字 ${totals.avgStreamingTps.toFixed(1)} tok/s` : ""}）`
+                : "暂无已完成耗时记录，待模型落盘 gen_metadata 后自动计算 TPS"}
+            </TooltipContent>
+          </Tooltip>
+        }
+        bar={
           <div className="flex h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-            <div
-              style={{ width: `${totals.outputTokens > 0 ? thinkingPct : 0}%` }}
-              className="bg-violet-500"
-            />
-            <div
-              style={{ width: `${totals.outputTokens > 0 ? responsePct : 0}%` }}
-              className="bg-amber-500"
-            />
+            <div style={{ width: `${totals.outputTokens > 0 ? thinkingPct : 0}%` }} className="bg-violet-500" />
+            <div style={{ width: `${totals.outputTokens > 0 ? responsePct : 0}%` }} className="bg-amber-500" />
           </div>
-
+        }
+        footer={
           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
             <span>
               思考 {formatTokens(totals.thinkingTokens)}
@@ -296,90 +334,71 @@ export const KpiCards = memo(function KpiCards({
             </span>
             <span>回复 {formatTokens(totals.responseTokens)}</span>
           </div>
-        </CardContent>
-      </Card>
+        }
+      />
 
-      {/* Card 4: 等效成本与分模型拆解 */}
-      <Card className="min-w-0 gap-0 overflow-hidden border-slate-200/80 bg-white py-2 shadow-2xs dark:border-slate-800/90 dark:bg-slate-900/70">
-        <CardContent className="space-y-1 px-3">
-          <div className="flex items-center justify-between gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            <span className="inline-flex items-center gap-1 truncate">
-              等效成本
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="查看等效 API 成本分模型拆解说明"
-                    className="inline-flex text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                  >
-                    <Info className="size-3" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-none space-y-1.5 p-2.5 whitespace-nowrap">
-                  <div className="font-medium text-slate-100 dark:text-slate-900">
-                    按模型拆解等效 API 成本
-                  </div>
-                  <div className="space-y-1">
-                    {rawModelCostSlices.map((m, idx) => {
-                      const st = resolveModelStyle(m.modelName, idx);
-                      const pct = totals.estimatedCostUsd > 0 ? (m.estimatedCostUsd / totals.estimatedCostUsd) * 100 : 0;
-                      return (
-                        <div key={m.modelName} className="flex items-center justify-between gap-4 text-[11px] tabular-nums">
-                          <span className="inline-flex items-center gap-1.5">
-                            <span style={{ backgroundColor: st.color }} className="inline-block size-1.5 shrink-0 rounded-full" />
-                            <span>{m.modelName}</span>
-                          </span>
-                          <span className="shrink-0 font-mono">
-                            {formatUsd(m.estimatedCostUsd)} ({pct.toFixed(0)}%)
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="border-t border-slate-700/60 pt-1 text-[10px] opacity-80 dark:border-slate-300/60">
-                    主会话 {mainConversationCount}
-                    {totals.subagentCount > 0 ? ` (+${totals.subagentCount}子)` : ""} ·{" "}
-                    {formatExactNumber(totals.callCount)} 轮 · 均 {formatDurationMs(totals.avgLatencyMs)}
-                  </div>
-                </TooltipContent>
-              </Tooltip>
+      <KpiCardShell
+        title={
+          <span className="inline-flex items-center gap-1 truncate">
+            等效成本
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="查看等效 API 成本分模型拆解说明"
+                  className="inline-flex text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                >
+                  <Info className="size-3" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-none space-y-1.5 p-2.5 whitespace-nowrap">
+                <div className="font-medium text-slate-100 dark:text-slate-900">按模型拆解等效 API 成本</div>
+                <ModelCostBreakdownRows slices={rawModelCostSlices} totalCostUsd={totals.estimatedCostUsd} />
+                <div className="border-t border-slate-700/60 pt-1 text-[10px] opacity-80 dark:border-slate-300/60">
+                  主会话 {mainConversationCount}
+                  {totals.subagentCount > 0 ? ` (+${totals.subagentCount}子)` : ""} ·{" "}
+                  {formatExactNumber(totals.callCount)} 轮 · 均 {formatDurationMs(totals.avgLatencyMs)}
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          </span>
+        }
+        icon={
+          <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-400 tabular-nums">
+            <span className="hidden sm:inline">
+              {mainConversationCount}会话 · {formatExactNumber(totals.callCount)}轮
             </span>
-            <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-400 tabular-nums">
-              <span className="hidden sm:inline">
-                {mainConversationCount}会话 · {formatExactNumber(totals.callCount)}轮
-              </span>
-              <Coins className="size-3.5 text-amber-500" />
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-baseline justify-between gap-x-1.5 gap-y-0.5">
-            <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
-              {formatUsd(totals.estimatedCostUsd)}
-            </span>
-            <Badge
-              variant="secondary"
-              className="h-4 max-w-full border border-amber-500/20 bg-amber-500/10 px-1.5 text-[10px] text-amber-700 tabular-nums dark:bg-amber-500/15 dark:text-amber-300"
-            >
-              今日 {formatUsd(totals.todayEstimatedCostUsd)}
-            </Badge>
-          </div>
-
+            <Coins className="size-3.5 text-amber-500" />
+          </span>
+        }
+        headline={
+          <span className="text-lg font-bold tracking-tight text-slate-950 tabular-nums dark:text-slate-50">
+            {formatUsd(totals.estimatedCostUsd)}
+          </span>
+        }
+        badge={
+          <Badge
+            variant="secondary"
+            className="h-4 max-w-full border border-amber-500/20 bg-amber-500/10 px-1.5 text-[10px] text-amber-700 tabular-nums dark:bg-amber-500/15 dark:text-amber-300"
+          >
+            今日 {formatUsd(totals.todayEstimatedCostUsd)}
+          </Badge>
+        }
+        bar={
           <div className="flex h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
             {displayCostItems.length > 0 ? (
               displayCostItems.map((item) => (
                 <div
                   key={item.key}
-                  style={{
-                    width: `${(item.costUsd / safeCostTotal) * 100}%`,
-                    backgroundColor: item.color,
-                  }}
+                  style={{ width: `${(item.costUsd / safeCostTotal) * 100}%`, backgroundColor: item.color }}
                 />
               ))
             ) : (
               <div className="h-full w-full bg-amber-500/70" />
             )}
           </div>
-
+        }
+        footer={
           <Tooltip>
             <TooltipTrigger asChild>
               <div className="flex cursor-default flex-wrap items-center justify-between gap-x-1.5 gap-y-0.5 text-[10.5px] leading-tight text-slate-500 tabular-nums dark:text-slate-400">
@@ -404,25 +423,12 @@ export const KpiCards = memo(function KpiCards({
               </div>
             </TooltipTrigger>
             <TooltipContent className="max-w-none space-y-1 p-2.5 whitespace-nowrap">
-              {rawModelCostSlices.map((m, idx) => {
-                const st = resolveModelStyle(m.modelName, idx);
-                return (
-                  <div key={m.modelName} className="flex items-center justify-between gap-3 text-[11px] tabular-nums">
-                    <span className="inline-flex items-center gap-1">
-                      <span style={{ backgroundColor: st.color }} className="inline-block size-1.5 rounded-full" />
-                      <span>{m.modelName}</span>
-                    </span>
-                    <span className="font-mono">
-                      {formatUsd(m.estimatedCostUsd)} · {formatTokens(m.totalTokens)}
-                    </span>
-                  </div>
-                );
-              })}
+              <ModelCostBreakdownRows slices={rawModelCostSlices} totalCostUsd={totals.estimatedCostUsd} showTokens />
             </TooltipContent>
           </Tooltip>
-
-          {/* 单池 7d 周周期下：输入官方 Usage 周剩余%，实时反算 100% 周满额 API 金额与总 Token */}
-          {isWeeklyPoolView && (
+        }
+        extra={
+          isWeeklyPoolView && (
             <div className="flex flex-wrap items-center justify-between gap-1.5 border-t border-slate-100 pt-1 text-[10.5px] tabular-nums dark:border-slate-800/80">
               <label className="inline-flex shrink-0 items-center gap-1 text-slate-500 dark:text-slate-400">
                 <span>周剩</span>
@@ -476,21 +482,16 @@ export const KpiCards = memo(function KpiCards({
                   </TooltipContent>
                 </Tooltip>
               ) : calibrationSyncError ? (
-                <span
-                  title={calibrationSyncError}
-                  className="truncate text-[10px] text-amber-600 dark:text-amber-400"
-                >
+                <span title={calibrationSyncError} className="truncate text-[10px] text-amber-600 dark:text-amber-400">
                   校准同步异常（已保留本地）
                 </span>
               ) : (
-                <span className="truncate text-[10px] text-slate-400 dark:text-slate-500">
-                  填%反算
-                </span>
+                <span className="truncate text-[10px] text-slate-400 dark:text-slate-500">填%反算</span>
               )}
             </div>
-          )}
-        </CardContent>
-      </Card>
+          )
+        }
+      />
     </section>
   );
 });

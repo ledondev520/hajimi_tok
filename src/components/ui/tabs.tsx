@@ -1,21 +1,14 @@
 /**
  * Input: radix-ui Tabs 无障碍选项卡原语、cva 与 @/lib/utils。
- * Output: 导出 Tabs、TabsList、TabsTrigger、TabsContent 组件。
- * Pos: src/components/ui/tabs.tsx，多维统计视图切换选项卡基础 UI 组件（由 shadcn CLI 生成）。
+ * Output: 导出 Tabs、TabsList、TabsTrigger 组件。
+ * Pos: src/components/ui/tabs.tsx，多维统计视图切换选项卡基础 UI 组件。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-"use client"
-
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 import { Tabs as TabsPrimitive } from "radix-ui"
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 Tabs。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
 function Tabs({
   className,
   orientation = "horizontal",
@@ -26,10 +19,7 @@ function Tabs({
       data-slot="tabs"
       data-orientation={orientation}
       orientation={orientation}
-      className={cn(
-        "group/tabs flex gap-2 data-[orientation=horizontal]:flex-col",
-        className
-      )}
+      className={cn("group/tabs flex gap-2 data-[orientation=horizontal]:flex-col", className)}
       {...props}
     />
   )
@@ -44,23 +34,15 @@ const tabsListVariants = cva(
         line: "gap-1 bg-transparent",
       },
     },
-    defaultVariants: {
-      variant: "default",
-    },
+    defaultVariants: { variant: "default" },
   }
 )
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 TabsList。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
 function TabsList({
   className,
   variant = "default",
   ...props
-}: React.ComponentProps<typeof TabsPrimitive.List> &
-  VariantProps<typeof tabsListVariants>) {
+}: React.ComponentProps<typeof TabsPrimitive.List> & VariantProps<typeof tabsListVariants>) {
   return (
     <TabsPrimitive.List
       data-slot="tabs-list"
@@ -71,15 +53,7 @@ function TabsList({
   )
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 TabsTrigger。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function TabsTrigger({
-  className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
+function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   return (
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
@@ -92,22 +66,4 @@ function TabsTrigger({
   )
 }
 
-/**
- * 职责：渲染 shadcn/ui 无障碍基础组件 TabsContent。
- * 参数：props — 组件属性与原生/Radix 透传属性（完整保留 aria-* 与键盘交互）。
- * 返回值：React 元素节点。
- */
-function TabsContent({
-  className,
-  ...props
-}: React.ComponentProps<typeof TabsPrimitive.Content>) {
-  return (
-    <TabsPrimitive.Content
-      data-slot="tabs-content"
-      className={cn("flex-1 outline-none", className)}
-      {...props}
-    />
-  )
-}
-
-export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }
+export { Tabs, TabsList, TabsTrigger }
