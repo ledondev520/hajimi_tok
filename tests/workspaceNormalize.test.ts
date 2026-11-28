@@ -66,8 +66,8 @@ afterEach(() => {
 describe("parseWorkspaceUris worktree & temp normalization", () => {
   it("resolves live git worktree .git pointer back to main repository name and path", () => {
     const sandbox = makeTempDir("hajimi-wt-test-");
-    const mainRepo = path.join(sandbox, "比稿--轻文化");
-    const wtDir = path.join(sandbox, ".t3", "worktrees", "比稿--轻文化", "t3-e6a34486-386339c26e802b93");
+    const mainRepo = path.join(sandbox, "project-alpha");
+    const wtDir = path.join(sandbox, ".t3", "worktrees", "project-alpha", "t3-e6a34486-386339c26e802b93");
     fs.mkdirSync(path.join(mainRepo, ".git", "worktrees", "t3-e6a34486-386339c26e802b93"), { recursive: true });
     fs.mkdirSync(wtDir, { recursive: true });
     fs.writeFileSync(
@@ -76,7 +76,7 @@ describe("parseWorkspaceUris worktree & temp normalization", () => {
     );
 
     const parsed = parseWorkspaceUris(JSON.stringify([`file://${encodeURI(wtDir)}`]));
-    expect(parsed.workspaceName).toBe("比稿--轻文化");
+    expect(parsed.workspaceName).toBe("project-alpha");
     expect(parsed.workspacePath).toBe(mainRepo);
   });
 
@@ -126,7 +126,7 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     const activeChildOfZeroParentId = "88888888-9999-aaaa-bbbb-cccccccccccc";
 
     const ins = db.prepare(`INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    ins.run(coordId, "主会话", 2, "2026-11-28T05:00:00Z", JSON.stringify(["file:///Users/demo/Cursor/jiesong_system"]), "done", "", "", 0);
+    ins.run(coordId, "主会话", 2, "2026-11-28T05:00:00Z", JSON.stringify(["file:///Users/demo/Cursor/demo-app"]), "done", "", "", 0);
     ins.run(
       swarmChildId,
       "",
@@ -165,7 +165,7 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
       "T3 分支任务",
       2,
       "2026-11-28T05:04:00Z",
-      JSON.stringify(["file:///Users/demo/.t3/worktrees/jiesong_system/t3-e6a34486-386339c26e802b93"]),
+      JSON.stringify(["file:///Users/demo/.t3/worktrees/demo-app/t3-e6a34486-386339c26e802b93"]),
       "done",
       "",
       "",
@@ -201,7 +201,7 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
       "",
       63,
       "2026-03-08 10:19:48+00:00",
-      JSON.stringify(["file:///Users/demo/Cursor/codex_token"]),
+      JSON.stringify(["file:///Users/demo/Cursor/legacy_app"]),
       "CASCADE_RUN_STATUS_IDLE",
       "",
       "",
@@ -213,7 +213,7 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
       "空壳父会话",
       1,
       "2026-11-28T05:07:00Z",
-      JSON.stringify(["file:///Users/demo/Cursor/jiesong_system"]),
+      JSON.stringify(["file:///Users/demo/Cursor/demo-app"]),
       "done",
       "",
       "",
@@ -245,18 +245,18 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     const summary = service.getSummary({ cycle: "all" });
 
     const wsNames = summary.byWorkspace.map((w) => w.workspaceName).sort();
-    expect(wsNames).toEqual(["jiesong_system", TEMP_CHAT_WORKSPACE]);
-    expect(summary.availableWorkspaces.sort()).toEqual(["jiesong_system", TEMP_CHAT_WORKSPACE]);
+    expect(wsNames).toEqual(["demo-app", TEMP_CHAT_WORKSPACE]);
+    expect(summary.availableWorkspaces.sort()).toEqual(["demo-app", TEMP_CHAT_WORKSPACE]);
 
-    // Legacy 0-token codex_token and 0001-01-01 setup probe are gone
+    // Legacy 0-token project and 0001-01-01 setup probe are gone
     expect(summary.conversations.some((c) => c.conversationId === zeroShellProbeId)).toBe(false);
     expect(summary.conversations.some((c) => c.conversationId === legacyPbProjectId)).toBe(false);
     // Zero-call parent of active child stays and passes project name down
     expect(summary.conversations.some((c) => c.conversationId === zeroParentWithChildId)).toBe(true);
 
-    const jiesong = summary.byWorkspace.find((w) => w.workspaceName === "jiesong_system")!;
-    expect(jiesong.conversationCount).toBe(6);
-    expect(jiesong.inputTokens).toBe(1000 + 2000 + 3000 + 4000 + 600);
+    const demoApp = summary.byWorkspace.find((w) => w.workspaceName === "demo-app")!;
+    expect(demoApp.conversationCount).toBe(6);
+    expect(demoApp.inputTokens).toBe(1000 + 2000 + 3000 + 4000 + 600);
 
     const tempWs = summary.byWorkspace.find((w) => w.workspaceName === TEMP_CHAT_WORKSPACE)!;
     expect(tempWs.conversationCount).toBe(3);
@@ -322,9 +322,9 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     const sumDb = new DatabaseSync(path.join(dataDir, "conversation_summaries.db"));
     createSummaryTable(sumDb);
     const ins = sumDb.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    ins.run(run1, "72 小时增量灵感盒执行", 2, "2026-11-27T10:00:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "", "", 0);
-    ins.run(run2, "72 小時自動靈感盒執行", 2, "2026-11-28T08:00:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "", "", 0);
-    ins.run(sub1, "", 1, "2026-11-28T08:01:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "research", run2, 1);
+    ins.run(run1, "定时日报生成任务", 2, "2026-11-27T10:00:00Z", JSON.stringify(["file:///Users/demo/project-alpha"]), "done", "", "", 0);
+    ins.run(run2, "定時日報生成任務", 2, "2026-11-28T08:00:00Z", JSON.stringify(["file:///Users/demo/project-alpha"]), "done", "", "", 0);
+    ins.run(sub1, "", 1, "2026-11-28T08:01:00Z", JSON.stringify(["file:///Users/demo/project-alpha"]), "done", "research", run2, 1);
     sumDb.close();
 
     writeJsonlStep(dataDir, run1, "2026-11-27T10:00:00Z", 1000);
@@ -340,7 +340,7 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     const sharedThread = "thread:project:demo:84235c1b-faf6-49b8-9bb2-952dda52db72";
     stateDb.prepare("INSERT INTO orchestration_v2_projection_threads VALUES (?, ?)").run(
       sharedThread,
-      "3天每2小时增量灵感盒（72h自动收官）"
+      "每日增量巡检任务"
     );
     stateDb.prepare("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)").run(
       `provider-thread:provider:antigravity:native-thread:${run1}`,
@@ -360,10 +360,10 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
 
     const c1 = summary.conversations.find((c) => c.conversationId === run1)!;
     const c2 = summary.conversations.find((c) => c.conversationId === run2)!;
-    expect(c1.title).toBe("3天每2小时增量灵感盒（72h自动收官）");
-    expect(c1.runTitle).toBe("72 小时增量灵感盒执行");
-    expect(c2.title).toBe("3天每2小时增量灵感盒（72h自动收官）");
-    expect(c2.runTitle).toBe("72 小時自動靈感盒執行");
+    expect(c1.title).toBe("每日增量巡检任务");
+    expect(c1.runTitle).toBe("定时日报生成任务");
+    expect(c2.title).toBe("每日增量巡检任务");
+    expect(c2.runTitle).toBe("定時日報生成任務");
     expect(c1.t3ThreadId).toBe(c2.t3ThreadId);
     expect(c1.t3ThreadId).toMatch(/^t3-[0-9a-f]{12}$/);
 

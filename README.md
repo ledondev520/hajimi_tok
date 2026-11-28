@@ -13,7 +13,7 @@ npm run build && npm run service:install   # 构建并注册 macOS 常驻服务�
 常用命令：
 
 ```bash
-npm run update           # 手动更新（常驻服务已内置每 10 分钟静默自动更新）
+npm run update           # 手动更新（常驻服务每 10 分钟以 --ff-only + npm ci 静默检查更新；设 AGY_DISABLE_AUTO_UPDATE=1 可关闭）
 npm run service:status   # 查看服务状态（另有 service:restart / service:stop）
 npm run stats            # 终端汇总（支持 --source <id> / --days 7 / --workspace <name> / --json）
 npm run dev              # 开发热更新（:5173）

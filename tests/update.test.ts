@@ -202,7 +202,7 @@ const fs = require("node:fs");
 const { execFileSync } = require("node:child_process");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callLogPath)}, JSON.stringify({ cmd: "npm", args }) + "\\n");
-if (args[0] === "install") {
+if (args[0] === "ci" || args[0] === "install") {
   if (${simulateDrift}) fs.writeFileSync("package-lock.json", '{"name":"hamiji-sta","drift":true}\\n', "utf8");
   process.exit(0);
 }
@@ -325,6 +325,7 @@ describe("hardened scripts/update.mjs & scripts/service.mjs", () => {
 
     const res = await runScript(UPDATE_SCRIPT, sb, ["--json", "--no-notify"]);
     expect(res.status).toBe(0);
+    expect(readCalls(sb.callLogPath).some((c) => c.cmd === "npm" && c.args[0] === "ci")).toBe(true);
     expect(fs.readFileSync(path.join(sb.workDir, "dist/index.html"), "utf8")).toBe("v2-deps\n");
     expect(gitIn(sb.workDir, ["status", "--porcelain"])).toBe("");
     expect(fs.statSync(bigLog).size).toBeLessThanOrEqual(256 * 1024);

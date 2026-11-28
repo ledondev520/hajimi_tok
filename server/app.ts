@@ -24,6 +24,7 @@ const VALID_CYCLES = new Set<QuotaCycleMode>(["5h", "prev-5h", "7d", "prev-7d", 
 const WINDOW_CYCLE_RE = /^window:\d+:\d+$/; // 任意历史周周期窗口标识正则
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i; // 仅允许本地回环 Host 头，防御 DNS Rebinding
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]); // 受信回环 Origin 主机名集合
+const TRUSTED_ORIGIN_PORTS = new Set(["4318", "5173"]); // 仅放行本看板生产/开发端口，阻断本机其他无关端口跨站读取或触发更新
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // 仓库根目录
 const UPDATE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "update.mjs"); // 一键自更新脚本路径
 const SERVICE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "service.mjs"); // 常驻服务脚本路径
@@ -134,22 +135,26 @@ function isTrustedLoopbackHost(hostHeader: string | undefined): boolean {
 }
 
 /**
- * 职责：校验可选浏览器 Origin 头是否来自本地回环源（仅放行 http://127.0.0.1|localhost|[::1]）。
- * 参数：originHeader — 请求 Origin 头。
+ * 职责：校验可选浏览器 Origin 头是否来自受信本地回环端口（仅放行本服务监听端口、4318 与开发端口 5173）。
+ * 参数：originHeader — 请求 Origin 头；hostHeader — 请求 Host 头。
  * 返回值：{ allowed, origin }，无 Origin 头时视为同源/CLI 请求返回 allowed=true, origin=null。
  */
-function resolveTrustedOrigin(originHeader: string | undefined): {
-  allowed: boolean;
-  origin: string | null;
-} {
+function resolveTrustedOrigin(
+  originHeader: string | undefined,
+  hostHeader?: string | undefined,
+): { allowed: boolean; origin: string | null } {
   if (!originHeader) return { allowed: true, origin: null };
   const raw = originHeader.trim();
+  const hostPort = hostHeader?.trim().match(/:(\d+)$/)?.[1] ?? "80";
   try {
     const parsed = new URL(raw);
+    const originPort = parsed.port || "80";
+    const portAllowed = originPort === hostPort || TRUSTED_ORIGIN_PORTS.has(originPort);
     if (
       parsed.origin === raw &&
       parsed.protocol === "http:" &&
-      LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase())
+      LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase()) &&
+      portAllowed
     ) {
       return { allowed: true, origin: raw };
     }
@@ -479,7 +484,7 @@ export function createTelemetryHttpServer(
         sendJson(res, 403, { error: "Forbidden host" });
         return;
       }
-      const originCheck = resolveTrustedOrigin(req.headers.origin);
+      const originCheck = resolveTrustedOrigin(req.headers.origin, req.headers.host);
       if (!originCheck.allowed) {
         sendJson(res, 403, { error: "Forbidden origin" });
         return;

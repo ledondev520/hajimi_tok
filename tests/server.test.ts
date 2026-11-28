@@ -502,9 +502,10 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
 
       const { baseUrl, port } = await startServer(provider, tmpDir);
 
-      // 1. 非受信 Origin 与跨站 Sec-Fetch-Site 均应返回 403
+      // 1. 非受信 Origin（外站、null 及本机无关端口）与跨站 Sec-Fetch-Site 均应返回 403
       expect((await fetch(`${baseUrl}/api/health`, { headers: { Origin: "https://evil.example" } })).status).toBe(403);
       expect((await fetch(`${baseUrl}/api/health`, { headers: { Origin: "null" } })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/health`, { headers: { Origin: "http://localhost:3000" } })).status).toBe(403);
       expect((await fetch(`${baseUrl}/api/summary`, { headers: { "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
 
       // 2. 非回环 Host 头（DNS Rebinding）返回 403

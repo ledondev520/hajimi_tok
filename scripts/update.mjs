@@ -588,7 +588,8 @@ export function performUpdate(options = {}) {
     };
 
     if (needInstall) {
-      runText(npmBin, ["install", "--no-audit", "--no-fund"], 300_000, repoRoot, env);
+      const installCmd = fs.existsSync(path.join(repoRoot, "package-lock.json")) ? "ci" : "install";
+      runText(npmBin, [installCmd, "--no-audit", "--no-fund"], 300_000, repoRoot, env);
       restoreLockfileDriftIfOnlyDirty(repoRoot, env);
       curState.pendingInstall = false;
       writeUpdateState(statePath, curState);
@@ -678,7 +679,7 @@ export function performUpdate(options = {}) {
     const steps = [];
     if (pulled) steps.push("git ff-only");
     else if (hasPending) steps.push("断点续建");
-    if (needInstall) steps.push("npm install");
+    if (needInstall) steps.push(fs.existsSync(path.join(repoRoot, "package-lock.json")) ? "npm ci" : "npm install");
     if (needBuild) steps.push("npm run build");
     if (restarted) steps.push(serviceAction === "install" ? "已重装并重启服务" : "已派发服务重启");
     else if (awaitDaemonConfirm) steps.push("待重启生效");
