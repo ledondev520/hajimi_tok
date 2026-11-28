@@ -12,6 +12,6 @@
 - `aggregator.ts`｜KPI、模型、项目、TTL（`WeakMap` 缓存）与严格 `nodeLimit` 调用时间线聚合
 - `multiSource.ts`｜多账号共享扫描与 T3 索引、跨源 `conversationId` 去重、同账号多目录合并、多源组合响应缓存、单账号周剩余配额直出与分账号状态隔离编排
 - `app.ts`｜HTTP API（`/api/*`、`GET /api/sources`、`?source=`、`nodeLimit`、`summary`/`conversations/:id` `WeakMap` 序列化+ETag 304+gzip 缓存）、导出与不可变静态资源内存缓存托管
-- `index.ts`｜本地常驻服务入口、多账号编排、10 分钟静默自动更新与多账号 `agy` 官方周剩配额定时刷新
+- `index.ts`｜本地常驻服务入口（`:4318`）、多账号编排与多账号 `agy` 官方周剩配额定时刷新
 - `cliRender.ts`｜终端报表参数解析（含 `--source`）与多账号表格渲染
 - `cli.ts`｜`npm run stats` 命令行入口

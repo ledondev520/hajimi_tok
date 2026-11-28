@@ -4,7 +4,6 @@
  * Pos: 关键正确性与安全合同回归测试套件（tests/regressions.test.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -400,7 +399,7 @@ describe("Independent CR P1 & P2 Regressions", () => {
     expect(fs.existsSync(explicitCal)).toBe(true);
   });
 
-  it("P2-4, P2-10 & P2-11: dirty update returns ok:false, statusline preserves custom wrappers & rejects null remaining_fraction", async () => {
+  it("P2-10 & P2-11: statusline preserves custom wrappers & rejects null remaining_fraction", async () => {
     // 1. statusline-bridge: 拒绝覆盖自定义包装命令与非对象配置，拒绝 remaining_fraction: null，保留真实 0
     const bridge = (await import(pathToFileURL(path.resolve("scripts/statusline-bridge.mjs")).href)) as {
       installAgyStatuslineHook: (opts: { agyDir: string; settingsPath: string }) => { installed: boolean };
@@ -447,185 +446,5 @@ describe("Independent CR P1 & P2 Regressions", () => {
     const merged = bridge.mergeLiveQuotaFile(livePath, { "pool:claude": { remainingPct: 42, resetTime: "", resetInSeconds: 0 } });
     expect(merged.pools["pool:gemini"]?.remainingPct).toBe(88);
     expect(merged.pools["pool:claude"]?.remainingPct).toBe(42);
-
-    // 2. update.mjs: 脏工作区(含断点续建)返回 ok:false、存活 PID 锁不被抢占、过期 {} NaN-PID 锁可回收、跨提交 B->C 保留 pendingBuild、confirmAppliedUpdate 校验 build 已完成
-    const updater = (await import(pathToFileURL(path.resolve("scripts/update.mjs")).href)) as {
-      acquireUpdateLock: (lockPath: string) => (() => void) | null;
-      checkForUpdate: (opts: { repoRoot: string; stateDir: string }) => { ok: boolean; available: boolean; behindCount: number; pendingSteps?: boolean };
-      confirmAppliedUpdate: (opts: { repoRoot: string; stateDir: string }) => { confirmed: boolean };
-      performUpdate: (opts: { repoRoot: string; stateDir: string; noRestart: boolean }) => { ok: boolean; dirty?: boolean; updated?: boolean; pendingRestart?: boolean; needBuild?: boolean };
-    };
-    const lockFile = path.join(bDir, "owner-test.lock");
-    // 写入当前存活 PID 但时间戳为 1 小时前的锁：存活持有人绝不可被抢占
-    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, token: "alive-holder", startedAt: Date.now() - 3_600_000 }), "utf8");
-    expect(updater.acquireUpdateLock(lockFile)).toBeNull();
-    // 写入已退出 PID 的锁：应能安全接管并释放
-    fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, token: "dead-holder", startedAt: Date.now() }), "utf8");
-    const rel = updater.acquireUpdateLock(lockFile);
-    expect(rel).not.toBeNull();
-    rel?.();
-    expect(fs.existsSync(lockFile)).toBe(false);
-    // P2-6: 过期的 {} 损坏锁（缺少 PID，避免 NaN!==NaN 卡死）必须可被安全回收
-    fs.writeFileSync(lockFile, "{}", "utf8");
-    const oldTime = new Date(Date.now() - 15 * 60_000);
-    fs.utimesSync(lockFile, oldTime, oldTime);
-    const relCorrupt = updater.acquireUpdateLock(lockFile);
-    expect(relCorrupt).not.toBeNull();
-    relCorrupt?.();
-    expect(fs.existsSync(lockFile)).toBe(false);
-    const gitBase = mkTmp("hamiji-p2-git-");
-    const remoteRepo = path.join(gitBase, "remote.git");
-    const localRepo = path.join(gitBase, "local");
-    const stateDir = path.join(gitBase, "state");
-    execFileSync("git", ["init", "--bare", remoteRepo], { stdio: "ignore" });
-    execFileSync("git", ["clone", remoteRepo, localRepo], { stdio: "ignore" });
-    const gitLocal = (args: string[]) =>
-      execFileSync("git", args, {
-        cwd: localRepo,
-        stdio: "ignore",
-        env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-      });
-    fs.writeFileSync(path.join(localRepo, "a.txt"), "v1\n");
-    fs.writeFileSync(path.join(localRepo, "package.json"), JSON.stringify({ name: "tmp", scripts: { build: "node -e \"\"" } }));
-    gitLocal(["add", "."]);
-    gitLocal(["commit", "-m", "init"]);
-    gitLocal(["push", "-u", "origin", "HEAD"]);
-
-    // 远端推进一笔新提交，本地置脏
-    const otherRepo = path.join(gitBase, "other");
-    execFileSync("git", ["clone", remoteRepo, otherRepo], { stdio: "ignore" });
-    fs.writeFileSync(path.join(otherRepo, "a.txt"), "v2\n");
-    execFileSync("git", ["add", "."], { cwd: otherRepo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "v2"], {
-      cwd: otherRepo,
-      stdio: "ignore",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    });
-    execFileSync("git", ["push"], { cwd: otherRepo, stdio: "ignore" });
-
-    fs.writeFileSync(path.join(localRepo, "a.txt"), "dirty\n");
-    const dirtyRes = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(dirtyRes.ok).toBe(false);
-    expect(dirtyRes.dirty).toBe(true);
-
-    // 清理脏改并合并后，若 update-state.json 标记 pendingBuild=true，即使 behindCount=0 也应检测到待续建
-    gitLocal(["checkout", "--", "a.txt"]);
-    const cleanRes = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(cleanRes.ok).toBe(true);
-    expect(cleanRes.updated).toBe(true);
-    const headFull = execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim();
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: "old", targetCommit: headFull, pendingInstall: false, pendingBuild: true, pendingRestart: true }),
-      "utf8"
-    );
-    const resumeCheck = updater.checkForUpdate({ repoRoot: localRepo, stateDir });
-    expect(resumeCheck.behindCount).toBe(0);
-    expect(resumeCheck.pendingSteps).toBe(true);
-    expect(resumeCheck.available).toBe(true);
-
-    // 追平但待续建期间若本地出现脏改，必须拒绝续建
-    fs.writeFileSync(path.join(localRepo, "a.txt"), "dirty-during-resume\n");
-    const dirtyResume = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(dirtyResume.ok).toBe(false);
-    expect(dirtyResume.dirty).toBe(true);
-    gitLocal(["checkout", "--", "a.txt"]);
-
-    // 远端修改 server/ 文件并以 --no-restart 拉取时，pendingRestart 必须保持 true 直到新进程确认生效
-    fs.mkdirSync(path.join(otherRepo, "server"), { recursive: true });
-    fs.writeFileSync(path.join(otherRepo, "server", "dummy.ts"), "// v3\n");
-    execFileSync("git", ["add", "."], { cwd: otherRepo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "v3-server"], {
-      cwd: otherRepo,
-      stdio: "ignore",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    });
-    execFileSync("git", ["push"], { cwd: otherRepo, stdio: "ignore" });
-    const deferRes = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(deferRes.ok).toBe(true);
-    expect(deferRes.pendingRestart).toBe(true);
-    const savedState = JSON.parse(fs.readFileSync(path.join(stateDir, "update-state.json"), "utf8")) as { pendingRestart: boolean };
-    expect(savedState.pendingRestart).toBe(true);
-    expect(updater.checkForUpdate({ repoRoot: localRepo, stateDir }).pendingSteps).toBe(true);
-
-    // P2-5: pendingBuild=true 时 confirmAppliedUpdate 绝不可提前确认生效；仅 install/build 均 false 时才确认
-    const curHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim();
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: "old", fromCommit: curHead, targetCommit: curHead, pendingInstall: false, pendingBuild: true, pendingRestart: true }),
-      "utf8"
-    );
-    expect(updater.confirmAppliedUpdate({ repoRoot: localRepo, stateDir }).confirmed).toBe(false);
-    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "update-state.json"), "utf8")).pendingBuild).toBe(true);
-
-    // P2-4: 模拟 B 有 pendingBuild=true，向远端 docs-only C 合并前中断（fromCommit=B, targetCommit=C），重试仍必须执行 build
-    fs.writeFileSync(path.join(otherRepo, "README.md"), "docs only\n");
-    execFileSync("git", ["add", "."], { cwd: otherRepo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "v4-docs"], {
-      cwd: otherRepo,
-      stdio: "ignore",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    });
-    execFileSync("git", ["push"], { cwd: otherRepo, stdio: "ignore" });
-    const commitC = execFileSync("git", ["rev-parse", "HEAD"], { cwd: otherRepo, encoding: "utf8" }).trim();
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: "old", fromCommit: curHead, targetCommit: commitC, pendingInstall: false, pendingBuild: true, pendingRestart: true }),
-      "utf8"
-    );
-    const recoverRes = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(recoverRes.ok).toBe(true);
-    expect(recoverRes.needBuild).toBe(true);
-    expect(updater.confirmAppliedUpdate({ repoRoot: localRepo, stateDir }).confirmed).toBe(true);
-
-    // P2-2 (round-5) 方向 A：常规 B 已生效（appliedCommit=B），已拉取 C 到本地且写 from=B,target=C 后合并前崩溃、恢复时断网 -> 必须识别 pending 并续合并本地 C
-    fs.writeFileSync(path.join(otherRepo, "a.txt"), "v5-local-c\n");
-    execFileSync("git", ["add", "."], { cwd: otherRepo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "v5-local-c"], {
-      cwd: otherRepo,
-      stdio: "ignore",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
-    });
-    execFileSync("git", ["push"], { cwd: otherRepo, stdio: "ignore" });
-    gitLocal(["fetch", "--quiet"]);
-    const fetchedC = execFileSync("git", ["rev-parse", "@{u}"], { cwd: localRepo, encoding: "utf8" }).trim();
-    const headB = execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim();
-    gitLocal(["remote", "set-url", "origin", "/nonexistent/offline-remote.git"]);
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: headB, fromCommit: headB, targetCommit: fetchedC, pendingInstall: false, pendingBuild: true, pendingRestart: true }),
-      "utf8"
-    );
-    const offlineLocalC = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(offlineLocalC.ok).toBe(true);
-    expect(offlineLocalC.updated).toBe(true);
-    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim()).toBe(fetchedC);
-
-    // P2-2 (round-5) 方向 B：B 自身未生效（appliedCommit=old），本地有已撤回的 C，但在线 fetch 确认上游已回到 B（behindCount=0）-> 绝不可合并已撤回的 C
-    gitLocal(["remote", "set-url", "origin", remoteRepo]);
-    gitLocal(["reset", "--hard", headB]);
-    execFileSync("git", ["reset", "--hard", headB], { cwd: otherRepo, stdio: "ignore" });
-    execFileSync("git", ["push", "--force"], { cwd: otherRepo, stdio: "ignore" });
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: "old", fromCommit: headB, targetCommit: fetchedC, pendingInstall: false, pendingBuild: true, pendingRestart: false }),
-      "utf8"
-    );
-    const onlineReverted = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(onlineReverted.ok).toBe(true);
-    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim()).toBe(headB);
-
-    // P2-4 (round-4): 合并前中断（HEAD=当前, targetCommit=尚未拉取的假提交）且 fetch 失败时，绝不可在旧 HEAD 上构建并吞掉原目标
-    const headC = execFileSync("git", ["rev-parse", "HEAD"], { cwd: localRepo, encoding: "utf8" }).trim();
-    const unreachedTarget = "1111111111111111111111111111111111111111";
-    gitLocal(["remote", "set-url", "origin", "/nonexistent/offline-remote.git"]);
-    fs.writeFileSync(
-      path.join(stateDir, "update-state.json"),
-      JSON.stringify({ appliedCommit: "old", fromCommit: headC, targetCommit: unreachedTarget, pendingInstall: false, pendingBuild: true, pendingRestart: true }),
-      "utf8"
-    );
-    const offlinePreMerge = updater.performUpdate({ repoRoot: localRepo, stateDir, noRestart: true });
-    expect(offlinePreMerge.ok).toBe(false);
-    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "update-state.json"), "utf8")).targetCommit).toBe(unreachedTarget);
-  }, 20_000);
+  });
 });

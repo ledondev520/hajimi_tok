@@ -777,7 +777,6 @@ export function App() {
               sourceId={appliedSource}
               open
               onOpenChange={(open) => { if (!open) setActiveConvId(null); }}
-              customRates={null}
             />
           </Suspense>
         )}

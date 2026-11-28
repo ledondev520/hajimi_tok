@@ -16,7 +16,6 @@ import { resolveScanCachePath } from "../server/scanCache";
 import { createT3ThreadIndex } from "../server/t3Threads";
 import { extractTodayCallSummary } from "../src/components/DailyUsageCard";
 import { groupByMainConversation } from "../src/lib/conversationGroups";
-import { recalculateSummaryWithCustomRates } from "../src/lib/format";
 
 const createdDirs: string[] = [];
 
@@ -264,14 +263,6 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     const tempWs = summary.byWorkspace.find((w) => w.workspaceName === TEMP_CHAT_WORKSPACE)!;
     expect(tempWs.conversationCount).toBe(3);
     expect(tempWs.inputTokens).toBe(400 + 100 + 500);
-
-    // Frontend custom pricing recalculation aggregates by workspaceName consistently across merged paths
-    const recalc = recalculateSummaryWithCustomRates(summary, [
-      { modelPattern: "*", label: "Flat", inputPerMillion: 10, cacheReadPerMillion: 1, outputPerMillion: 20 },
-    ]);
-    const recalcTemp = recalc.byWorkspace.find((w) => w.workspaceName === TEMP_CHAT_WORKSPACE)!;
-    const expectedTempCost = (1000 / 1_000_000) * 10 + (300 / 1_000_000) * 20;
-    expect(recalcTemp.estimatedCostUsd).toBeCloseTo(expectedTempCost, 8);
   });
 
   it("deduplicates identical conversationId across merged multi-account sources", () => {

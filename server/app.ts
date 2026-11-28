@@ -1,17 +1,15 @@
 /**
- * Input: node:http、node:fs、node:path、node:url 内置模块与 TelemetryProvider 领域服务接口。
- * Output: 导出 createTelemetryHttpServer HTTP 服务工厂、resolveUpdateServiceAction 动作归一化及查询参数解析、CSV 序列化工具函数。
+ * Input: node:crypto、node:fs、node:http、node:path、node:url、node:zlib 与 TelemetryProvider 领域服务接口。
+ * Output: 导出 createTelemetryHttpServer HTTP 服务工厂、parseSummaryQuery 查询参数解析与 serializeConversationsCsv 导出函数。
  * Pos: 服务端只读 HTTP API 路由层、CSV/JSON 报表导出层与前端静态资源安全托管层。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 
-import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, URL } from "node:url";
+import { URL } from "node:url";
 import zlib from "node:zlib";
 import type {
   ConversationUsageSummary,
@@ -24,44 +22,7 @@ const VALID_CYCLES = new Set<QuotaCycleMode>(["5h", "prev-5h", "7d", "prev-7d", 
 const WINDOW_CYCLE_RE = /^window:\d+:\d+$/; // 任意历史周周期窗口标识正则
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i; // 仅允许本地回环 Host 头，防御 DNS Rebinding
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]); // 受信回环 Origin 主机名集合
-const TRUSTED_ORIGIN_PORTS = new Set(["4318", "5173"]); // 仅放行本看板生产/开发端口，阻断本机其他无关端口跨站读取或触发更新
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // 仓库根目录
-const UPDATE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "update.mjs"); // 一键自更新脚本路径
-const SERVICE_SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "service.mjs"); // 常驻服务脚本路径
-const UPDATE_LOCK_PATH = path.join(
-  process.env.AGY_STATE_DIR?.trim() || path.join(os.homedir(), ".hamiji-sta"),
-  "update.lock"
-); // 与 scripts/update.mjs 共享的跨进程更新锁路径
-const UPDATE_CHECK_TTL_MS = 5 * 60_000; // 更新检测结果缓存 5 分钟，避免反复检测
-const sharedUpdateState: {
-  checkCache: { data: Record<string, unknown>; expiresAt: number } | null;
-  cacheVersion: number;
-  inFlight: boolean;
-} = { checkCache: null, cacheVersion: 0, inFlight: false }; // 跨回环多监听实例共享更新状态与缓存版本
-
-/** 校验并归一化 update.mjs 返回的服务动作（显式 null 时不触发服务重启）。 */
-export function resolveUpdateServiceAction(result: Record<string, unknown>): "install" | "restart" | null {
-  if (result.serviceAction === "install" || result.serviceAction === "restart") return result.serviceAction;
-  if (result.serviceAction === null) return null;
-  return result.needRestart ? "restart" : null;
-}
-
-/** 异步调用 scripts/update.mjs 并解析 JSON 输出，不阻塞主事件循环。 */
-function runUpdateScriptJson(args: string[], timeoutMs: number): Promise<Record<string, unknown>> {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(UPDATE_SCRIPT_PATH)) {
-      resolve({ ok: false, available: false, behindCount: 0, message: "更新脚本不存在" });
-      return;
-    }
-    execFile(process.execPath, [UPDATE_SCRIPT_PATH, ...args], { cwd: REPO_ROOT, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
-      const text = (stdout || "").trim();
-      if (text) {
-        try { resolve(JSON.parse(text) as Record<string, unknown>); return; } catch { /* 解析失败走下方兜底 */ }
-      }
-      resolve({ ok: false, available: false, behindCount: 0, message: err instanceof Error ? err.message : "执行更新脚本失败" });
-    });
-  });
-}
+const TRUSTED_ORIGIN_PORTS = new Set(["4318", "5173"]); // 仅放行本看板生产/开发端口，阻断本机其他无关端口跨站读取
 
 /** HTTP 服务可选配置项 */
 export interface TelemetryHttpServerOptions {
@@ -639,63 +600,6 @@ export function createTelemetryHttpServer(
           replyJson(200, { calibrations });
         } catch (err) {
           replyJson(400, { error: err instanceof Error ? err.message : "删除周校准失败" });
-        }
-        return;
-      }
-
-      // 1.1.3. 本地仓库自更新检测与一键执行接口（GET / POST /api/update，死锁回收与互斥由 update.mjs 统一裁决）
-      const isLockHeldByAlive = (): boolean => {
-        if (!fs.existsSync(UPDATE_LOCK_PATH)) return false;
-        try {
-          const parsed = JSON.parse(fs.readFileSync(UPDATE_LOCK_PATH, "utf8")) as { pid?: unknown };
-          const pid = Number(parsed?.pid);
-          if (!Number.isInteger(pid) || pid <= 0) return false;
-          process.kill(pid, 0);
-          return true;
-        } catch (err) {
-          return Boolean(err && typeof err === "object" && (err as { code?: string }).code === "EPERM");
-        }
-      };
-      if (pathname === "/api/update" && req.method === "GET") {
-        const force = url.searchParams.get("force") === "1";
-        if (!force && sharedUpdateState.checkCache && Date.now() < sharedUpdateState.checkCache.expiresAt) {
-          replyJson(200, { ...sharedUpdateState.checkCache.data, updating: sharedUpdateState.inFlight || isLockHeldByAlive() });
-          return;
-        }
-        const startVer = sharedUpdateState.cacheVersion;
-        const data = await runUpdateScriptJson(["--check", "--json"], 55_000);
-        if (data.ok === true && sharedUpdateState.cacheVersion === startVer) {
-          sharedUpdateState.checkCache = { data, expiresAt: Date.now() + UPDATE_CHECK_TTL_MS };
-        }
-        replyJson(200, { ...data, updating: sharedUpdateState.inFlight || isLockHeldByAlive() });
-        return;
-      }
-      if (pathname === "/api/update" && req.method === "POST") {
-        if (sharedUpdateState.inFlight) {
-          replyJson(409, { ok: false, updated: false, busy: true, message: "正在更新中，请稍候" });
-          return;
-        }
-        sharedUpdateState.inFlight = true;
-        try {
-          const result = await runUpdateScriptJson(["--no-restart", "--no-notify", "--json"], 560_000);
-          sharedUpdateState.cacheVersion += 1;
-          sharedUpdateState.checkCache = null;
-          const serviceAction = resolveUpdateServiceAction(result);
-          const willRestart = Boolean(result.ok && result.updated && serviceAction);
-          const statusCode = result.busy ? 409 : result.ok ? 200 : 400;
-          replyJson(statusCode, { ...result, restarting: willRestart });
-          if (willRestart && serviceAction && fs.existsSync(SERVICE_SCRIPT_PATH)) {
-            setTimeout(() => {
-              const child = spawn(process.execPath, [SERVICE_SCRIPT_PATH, serviceAction], {
-                cwd: REPO_ROOT,
-                detached: true,
-                stdio: "ignore",
-              });
-              child.unref();
-            }, 350);
-          }
-        } finally {
-          sharedUpdateState.inFlight = false;
         }
         return;
       }

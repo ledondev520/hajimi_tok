@@ -13,12 +13,17 @@ import type {
 } from "@/types/telemetry";
 import {
   computeAdaptiveLinearBounds,
+  extractTodayCallSummary,
   formatExactNumber,
   formatTokens,
   formatUsd,
   readStoredJson,
+  resolveDayMeta,
+  toLocalDayKey,
   writeStoredJson,
 } from "@/lib/format";
+
+export { extractTodayCallSummary, resolveDayMeta, toLocalDayKey };
 import {
   ModelCallChart,
   resolveModelStyle,
@@ -79,109 +84,6 @@ const PAD_LEFT = 48; // 左侧主轴（Token）刻度留白
 const PAD_RIGHT = 50; // 右侧次轴（$ USD 费用）刻度留白
 const PAD_TOP = 12; // 顶部圆点留白
 const PAD_BOTTOM = 22; // 底部日期横轴留白
-const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]; // 星期名称
-
-/**
- * 职责：将 Date 实例格式化为本地时区 YYYY-MM-DD 字符串。
- * 参数：d — Date 实例。
- * 返回值：YYYY-MM-DD 日期键。
- */
-export function toLocalDayKey(d: Date): string {
-  // 0. 补齐两位月与日拼接为本地日期键
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/**
- * 职责：根据 YYYY-MM-DD 日期键解析本地星期标签与是否今日标记。
- * 参数：bucketKey — YYYY-MM-DD 格式日期字符串；todayKey — 今日 YYYY-MM-DD 键。
- * 返回值：包含 weekdayLabel 与 isToday 的对象。
- */
-export function resolveDayMeta(
-  bucketKey: string,
-  todayKey: string
-): { weekdayLabel: string; isToday: boolean } {
-  // 0. 对比今日日期键并计算星期几
-  const isToday = bucketKey === todayKey;
-  const parts = bucketKey.split("-").map(Number);
-  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) {
-    return { weekdayLabel: isToday ? "今日" : "", isToday };
-  }
-  const dateObj = new Date(parts[0], parts[1] - 1, parts[2]);
-  const weekday = WEEKDAY_NAMES[dateObj.getDay()] ?? "";
-  return {
-    weekdayLabel: isToday ? `今日·${weekday}` : weekday,
-    isToday,
-  };
-}
-
-/**
- * 职责：筛选自然今日的调用节点并按模型汇总，供「今日」模式折线图复用（当 callTimeline 因 nodeLimit 仅含尾部节点时，自动用 dailyTrend 今日桶补齐真实全天轮数与分模型累计值）。
- * 参数：callTimeline — 调用节点序列；byModel — 周期内分模型汇总；dailyTrend — 可选按日趋势桶（用于还原受 nodeLimit 截断的今日全量计数与模型汇总）。
- * 返回值：包含 todayNodes、todayByModel 与 todayTotalCalls 的对象。
- */
-export function extractTodayCallSummary(
-  callTimeline: CallNodePoint[],
-  byModel: ModelUsageBreakdown[],
-  dailyTrend?: UsageTimeBucket[]
-): { todayNodes: CallNodePoint[]; todayByModel: ModelUsageBreakdown[]; todayTotalCalls: number } {
-  const todayKey = toLocalDayKey(new Date());
-  const matchedNodes = callTimeline.filter((n) => {
-    const parsed = new Date(n.timestamp);
-    return !Number.isNaN(parsed.getTime()) && toLocalDayKey(parsed) === todayKey;
-  });
-  const todayBucket = dailyTrend?.find((b) => b.bucketKey === todayKey);
-  const todayTotalCalls = Math.max(matchedNodes.length, todayBucket?.callCount ?? 0);
-  const toBreakdown = (
-    modelName: string,
-    s: { modelId?: string; callCount?: number; inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd?: number }
-  ): ModelUsageBreakdown => {
-    const ref = byModel.find((item) => item.modelName === modelName);
-    const promptSum = s.inputTokens + s.cacheReadTokens;
-    return {
-      modelName,
-      modelId: s.modelId || ref?.modelId || modelName,
-      conversationCount: 0,
-      callCount: s.callCount ?? 0,
-      inputTokens: s.inputTokens,
-      cacheReadTokens: s.cacheReadTokens,
-      outputTokens: s.outputTokens,
-      thinkingTokens: 0,
-      responseTokens: 0,
-      totalTokens: s.totalTokens,
-      cacheHitRate: promptSum > 0 ? s.cacheReadTokens / promptSum : 0,
-      avgLatencyMs: 0,
-      avgOutputTps: ref?.avgOutputTps ?? 0,
-      avgStreamingTps: ref?.avgStreamingTps ?? 0,
-      estimatedCostUsd: s.estimatedCostUsd ?? 0,
-      cacheSavedUsd: 0,
-      shareOfTotalTokens: 0,
-    };
-  };
-
-  if (todayBucket?.models && todayBucket.models.length > 0 && todayBucket.callCount > matchedNodes.length) {
-    return {
-      todayNodes: matchedNodes,
-      todayByModel: todayBucket.models.map((m) => toBreakdown(m.modelName, m)),
-      todayTotalCalls,
-    };
-  }
-
-  const modelStatsMap = new Map<string, { inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number }>();
-  for (const n of matchedNodes) {
-    const cur = modelStatsMap.get(n.modelName) ?? { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-    cur.inputTokens += n.inputTokens;
-    cur.cacheReadTokens += n.cacheReadTokens;
-    cur.outputTokens += n.outputTokens;
-    cur.totalTokens += n.totalTokens;
-    modelStatsMap.set(n.modelName, cur);
-  }
-  return {
-    todayNodes: matchedNodes,
-    todayByModel: [...modelStatsMap.entries()].map(([name, stats]) => toBreakdown(name, stats)),
-    todayTotalCalls,
-  };
-}
 
 /**
  * 职责：渲染合并后的趋势主图卡片——默认展示「近7天」分模型 Token（左主轴实线 ●）与费用（右次轴虚线 ○）双轴同显折线，切换「今日」时呈现当日单次节点调用增量折线。

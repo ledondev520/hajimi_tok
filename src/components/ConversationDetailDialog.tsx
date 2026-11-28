@@ -6,7 +6,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Loader2, Percent, RefreshCw, Wrench } from "lucide-react";
-import type { ConversationDetail, ModelPriceRate, StepUsageRecord } from "@/types/telemetry";
+import type { ConversationDetail, StepUsageRecord } from "@/types/telemetry";
 import {
   buildStepCacheRateSeries,
   computeAdaptivePercentBounds,
@@ -16,7 +16,6 @@ import {
   formatPercent,
   formatTokens,
   formatUsd,
-  recalculateDetailWithCustomRates,
   resolveContextHealth,
 } from "@/lib/format";
 import {
@@ -417,30 +416,20 @@ export interface ConversationDetailDialogProps {
   conversationId: string | null; // 待钻取查询的会话 UUID（null 时关闭）
   open: boolean; // 受控打开状态
   onOpenChange: (open: boolean) => void; // 模态框状态变更回调
-  customRates: ModelPriceRate[] | null; // 当前生效的自定义单价配置
   sourceId?: string; // 可选数据源 ID（多账号场景下透传至详情接口）
 }
 
-/**
- * 职责：打开时按需请求 GET /api/conversations/:id 并渲染会话元数据与单步推理明细表。
- * 思路：监听 open 与 conversationId 拉取详情，使用 flex 列自适应布局与 min-w-0 双向滚动容器渲染单步 Table，展示双源标记、上下文水位与工具触发链。
- * 参数：props — 受控弹窗开关、conversationId、sourceId 及自定义费率。
- * 返回值：无障碍 Radix Dialog 模态框节点。
- */
 export function ConversationDetailDialog({
   conversationId,
   open,
   onOpenChange,
-  customRates,
   sourceId = "",
 }: ConversationDetailDialogProps) {
-  // 0. 管理异步请求状态、错误消息与重试计数器
-  const [rawDetail, setRawDetail] = useState<ConversationDetail | null>(null); // 服务端返回的原始详情
-  const [loading, setLoading] = useState(false); // 是否加载中
-  const [errorMsg, setErrorMsg] = useState<string | null>(null); // 请求失败原因
-  const [reloadTick, setReloadTick] = useState(0); // 手动重试触发器
+  const [detail, setDetail] = useState<ConversationDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
-  // 1.1. 弹窗打开时请求指定会话的单步详情接口
   useEffect(() => {
     if (!open || !conversationId) return;
     let cancelled = false;
@@ -457,7 +446,7 @@ export function ConversationDetailDialog({
           "conversationId" in json ? json : json.data ?? json.conversation
         ) as ConversationDetail | undefined;
         if (!payload) throw new Error("未找到会话详情数据");
-        if (!cancelled) setRawDetail(payload);
+        if (!cancelled) setDetail(payload);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -472,12 +461,6 @@ export function ConversationDetailDialog({
       cancelled = true;
     };
   }, [open, conversationId, sourceId, reloadTick]);
-
-  // 1.2. 应用客户端自定义单价重算单步与汇总成本
-  const detail = useMemo(
-    () => (rawDetail ? recalculateDetailWithCustomRates(rawDetail, customRates) : null),
-    [rawDetail, customRates]
-  );
 
   const sortedTools = useMemo(() => {
     if (!detail) return [];

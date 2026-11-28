@@ -4,7 +4,7 @@
  * Pos: 看板首屏紧凑 KPI 概览层，单行并排展示四张高信息密度卡片（src/components/KpiCards.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo } from "react";
 import { BrainCircuit, Coins, Info, Layers, Zap } from "lucide-react";
 import type {
   GlobalKpiTotals,
@@ -13,18 +13,14 @@ import type {
   QuotaCycleInfo,
 } from "@/types/telemetry";
 import {
-  computeWeeklyQuotaProjection,
   formatDateTime,
   formatDurationMs,
   formatExactNumber,
   formatPercent,
   formatTokens,
   formatUsd,
-  readStoredJson,
-  resolveWeeklyCalibration,
-  writeStoredJson,
-  type WeeklyQuotaCalibration,
 } from "@/lib/format";
+import { useWeeklyCalibration } from "@/lib/useWeeklyCalibration";
 import { resolveModelStyle } from "@/components/ModelCallChart";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,8 +31,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-
-const WEEKLY_CALIBRATION_STORAGE_KEY = "agy_weekly_quota_calibrations_v1"; // 本地持久化各池/周周期官方剩余%校准表
 
 /** KpiCards 组件入参属性 */
 export interface KpiCardsProps {
@@ -51,12 +45,6 @@ export interface KpiCardsProps {
   activeSource?: string; // 当前激活的数据源 ID（多账号场景下用于隔离周校准存储）
 }
 
-/**
- * 职责：紧凑渲染顶部四张核心指标卡片（总消耗、缓存命中率、输出拆解、等效成本与分模型拆解）。
- * 思路：采用 grid-cols-2 lg:grid-cols-4 保证宽屏一行四卡、分屏两列两行自适应，所有底栏支持 flex-wrap 防窄窗穿模溢出。
- * 参数：props — 包含 totals 核心统计、byModel 分模型拆解、mainConversationCount 主会话数及可选 activeModelLabel / quotaWindow / activeSource。
- * 返回值：响应式四卡紧凑 KPI 网格节点。
- */
 export const KpiCards = memo(function KpiCards({
   totals,
   byModel = [],
@@ -68,309 +56,23 @@ export const KpiCards = memo(function KpiCards({
   isWorkspaceFiltered = false,
   activeSource = "",
 }: KpiCardsProps) {
-  const srcQ = activeSource && activeSource !== "all" ? `source=${encodeURIComponent(activeSource)}` : "";
-  const calUrl = srcQ ? `/api/calibrations?${srcQ}` : "/api/calibrations";
-  const calStoreKey = srcQ ? `${WEEKLY_CALIBRATION_STORAGE_KEY}:${activeSource}` : WEEKLY_CALIBRATION_STORAGE_KEY;
-  // 0. 周配额剩余百分比校准态（仅「当前 7d + 整池未筛工作区」允许写入，历史回看与单项目视图严格只读防污染）
-  const isWeeklyPoolView = Boolean(
-    activePoolKey &&
-      !isWorkspaceFiltered &&
-      quotaWindow?.windowStart &&
-      (quotaWindow.mode === "7d" || quotaWindow.mode.startsWith("window:"))
-  );
-  const [calibrationsSynced, setCalibrationsSynced] = useState<boolean>(false);
-  const [calibrationSyncError, setCalibrationSyncError] = useState<string>("");
-  const canWriteWeeklyCalibration = Boolean(calibrationsSynced && isWeeklyPoolView && quotaWindow?.mode === "7d");
-  const calibrationKey = isWeeklyPoolView ? `${activePoolKey}:${quotaWindow!.windowStart}` : "";
-  const [calibrations, setCalibrations] = useState<Record<string, WeeklyQuotaCalibration>>(() =>
-    readStoredJson<Record<string, WeeklyQuotaCalibration>>(calStoreKey, {})
-  );
-  const matchedCalibration = useMemo(
-    () =>
-      isWeeklyPoolView
-        ? resolveWeeklyCalibration(
-            calibrations,
-            activePoolKey,
-            quotaWindow?.windowStart,
-            quotaWindow?.windowEnd
-          )
-        : null,
-    [calibrations, isWeeklyPoolView, activePoolKey, quotaWindow?.windowStart, quotaWindow?.windowEnd]
-  );
-  const activeCalibration = matchedCalibration?.calibration ?? null;
-  const [draftPct, setDraftPct] = useState<string>(() =>
-    activeCalibration ? String(activeCalibration.remainingPct) : ""
-  );
-  const userTouchedKeysRef = useRef<Set<string>>(new Set());
-  const keyMutationSeqRef = useRef<Map<string, number>>(new Map()); // 按校准键单调递增序号，丢弃过期异步响应
-  const deletedAtByKeyRef = useRef<Map<string, number>>(new Map()); // 客户端同键删除时间戳，阻止防抖窗口内旧采样抢占删除
-  const isUserEditingRef = useRef(false);
-  const prevCalibrationKeyRef = useRef(calibrationKey);
-  const syncTimerRef = useRef<number | null>(null);
-  const appliedLiveAtRef = useRef<string>("");
-
-  const bumpKeySeq = (k: string): number => {
-    const next = (keyMutationSeqRef.current.get(k) ?? 0) + 1;
-    keyMutationSeqRef.current.set(k, next);
-    return next;
-  };
-  const syncAuthoritativeKey = (
-    reqKey: string,
-    reqSeq: number | undefined,
-    payload: { calibrations?: Record<string, WeeklyQuotaCalibration> } | null
-  ) => {
-    if (!payload?.calibrations || keyMutationSeqRef.current.get(reqKey) !== reqSeq) return;
-    const authoritative = payload.calibrations[reqKey];
-    setCalibrations((prev) => {
-      const next = { ...prev };
-      if (authoritative) next[reqKey] = authoritative;
-      else delete next[reqKey];
-      writeStoredJson(calStoreKey, next);
-      return next;
-    });
-  };
-
-  // 0.0. 挂载时以服务端 initialized 为唯一权威：未初始化时忽略历史前端标志并整批原子迁移，确认成功或 409 已初始化后再开放写入
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(calUrl);
-        if (!res.ok) {
-          if (!cancelled) {
-            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
-            setCalibrationSyncError(errJson?.error || "周校准服务读取异常，已保留本地缓存");
-          }
-          return;
-        }
-        const data = (await res.json()) as {
-          calibrations?: Record<string, WeeklyQuotaCalibration>;
-          initialized?: boolean;
-        } | null;
-        if (cancelled || !data || !data.calibrations) return;
-        const remote = data.calibrations;
-
-        if (data.initialized) {
-          setCalibrations((prev) => {
-            const next = { ...remote };
-            for (const k of userTouchedKeysRef.current) {
-              if (k in prev) next[k] = prev[k];
-              else delete next[k];
-            }
-            writeStoredJson(calStoreKey, next);
-            return next;
-          });
-          setCalibrationSyncError("");
-          setCalibrationsSynced(true);
-          return;
-        }
-
-        const local = readStoredJson<Record<string, WeeklyQuotaCalibration>>(calStoreKey, {});
-        if (Object.keys(local).length === 0) {
-          setCalibrations(remote);
-          writeStoredJson(calStoreKey, remote);
-          setCalibrationSyncError("");
-          setCalibrationsSynced(true);
-          return;
-        }
-
-        // 服务端未初始化且本地有历史：整批原子提交；若遇 409 表示另一窗口已完成初始化，直接采纳服务端权威状态
-        const postRes = await fetch(calUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ batch: local }),
-        });
-        if (cancelled) return;
-        if (postRes.status === 409) {
-          const conflictPayload = (await postRes.json().catch(() => null)) as {
-            calibrations?: Record<string, WeeklyQuotaCalibration>;
-          } | null;
-          if (!cancelled && conflictPayload?.calibrations) {
-            setCalibrations(conflictPayload.calibrations);
-            writeStoredJson(calStoreKey, conflictPayload.calibrations);
-            setCalibrationSyncError("");
-            setCalibrationsSynced(true);
-          }
-          return;
-        }
-        if (!postRes.ok) {
-          const errJson = (await postRes.json().catch(() => null)) as { error?: string } | null;
-          if (!cancelled) {
-            setCalibrationSyncError(errJson?.error || "历史校准迁移失败，已保留本地副本");
-          }
-          return;
-        }
-        const savedPayload = (await postRes.json()) as {
-          calibrations?: Record<string, WeeklyQuotaCalibration>;
-        };
-        if (cancelled || !savedPayload?.calibrations) return;
-        setCalibrations(savedPayload.calibrations);
-        writeStoredJson(calStoreKey, savedPayload.calibrations);
-        setCalibrationSyncError("");
-        setCalibrationsSynced(true);
-      } catch {
-        if (!cancelled) {
-          setCalibrationSyncError("周校准同步失败，已保留本地副本");
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (syncTimerRef.current !== null) {
-        window.clearTimeout(syncTimerRef.current);
-      }
-    };
-  }, [calUrl, calStoreKey]);
-
-  // 0.0.1. 仅在服务端完成初始化同步 + 当前 7d + 整池未筛工作区视图下，才将官方 statusLine 实时周剩余按采样时刻整池消耗回填
-  useEffect(() => {
-    if (!calibrationsSynced || !canWriteWeeklyCalibration || !calibrationKey || !liveQuota) return;
-    if (liveQuota.remainingPct < 0 || liveQuota.remainingPct >= 100) return;
-    if (liveQuota.windowStart && liveQuota.windowStart !== quotaWindow?.windowStart) return;
-    const liveMs = Date.parse(liveQuota.updatedAt);
-    const startMs = quotaWindow?.windowStart ? Date.parse(quotaWindow.windowStart) : 0;
-    const endMs = quotaWindow?.windowEnd ? Date.parse(quotaWindow.windowEnd) : 0;
-    if (!Number.isFinite(liveMs) || (startMs > 0 && liveMs < startMs) || (endMs > 0 && liveMs >= endMs)) {
-      return;
-    }
-    const sampleCostUsd =
-      typeof liveQuota.poolCostUsdAtSample === "number" && liveQuota.poolCostUsdAtSample >= 0
-        ? liveQuota.poolCostUsdAtSample
-        : totals.estimatedCostUsd;
-    const sampleTokens =
-      typeof liveQuota.poolTokensAtSample === "number" && liveQuota.poolTokensAtSample >= 0
-        ? liveQuota.poolTokensAtSample
-        : totals.totalTokens;
-    if (sampleTokens <= 0) return;
-    const liveSig = `${calibrationKey}|${liveQuota.updatedAt}|${liveQuota.remainingPct}|${sampleTokens}`;
-    if (appliedLiveAtRef.current === liveSig) return;
-    const deletedMs = deletedAtByKeyRef.current.get(calibrationKey) ?? 0;
-    const activeAtMs = activeCalibration ? Date.parse(activeCalibration.calibratedAt || "") : 0;
-    const curAtMs = Math.max(Number.isFinite(activeAtMs) ? activeAtMs : 0, deletedMs);
-    if (curAtMs >= liveMs) {
-      appliedLiveAtRef.current = liveSig;
-      return;
-    }
-    appliedLiveAtRef.current = liveSig;
-    const reqKey = calibrationKey;
-    const reqSeq = bumpKeySeq(reqKey);
-    const entry: WeeklyQuotaCalibration = {
-      remainingPct: liveQuota.remainingPct,
-      calibratedCostUsd: sampleCostUsd,
-      calibratedTokens: sampleTokens,
-      calibratedAt: liveQuota.updatedAt,
-    };
-    void fetch(calUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: reqKey, source: "auto", ...entry }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((payload) => syncAuthoritativeKey(reqKey, reqSeq, payload))
-      .catch(() => undefined);
-  }, [calibrationsSynced, canWriteWeeklyCalibration, calibrationKey, liveQuota, quotaWindow?.windowStart, quotaWindow?.windowEnd, totals.estimatedCostUsd, totals.totalTokens, activeCalibration, calUrl]);
-
-  useEffect(() => {
-    const keyChanged = prevCalibrationKeyRef.current !== calibrationKey;
-    prevCalibrationKeyRef.current = calibrationKey;
-    if (keyChanged) {
-      isUserEditingRef.current = false;
-      setDraftPct(activeCalibration ? String(activeCalibration.remainingPct) : "");
-      return;
-    }
-    if (!isUserEditingRef.current) {
-      setDraftPct(activeCalibration ? String(activeCalibration.remainingPct) : "");
-    }
-  }, [calibrationKey, matchedCalibration?.key, activeCalibration?.remainingPct]);
-
-  const weeklyProjection = useMemo(
-    () =>
-      computeWeeklyQuotaProjection(
-        activeCalibration,
-        totals.estimatedCostUsd,
-        totals.totalTokens
-      ),
-    [activeCalibration, totals.estimatedCostUsd, totals.totalTokens]
-  );
-
-  /**
-   * 职责：响应用户输入的官方周剩余百分比，持久化当前周期校准快照至本地与服务端 ~/.hamiji-sta/calibrations.json。
-   * 参数：raw — 输入框文本（0 ~ 99 或空串）。
-   */
-  const handleRemainingPctChange = (raw: string) => {
-    if (!canWriteWeeklyCalibration || !calibrationKey) return;
-    isUserEditingRef.current = true;
-    userTouchedKeysRef.current.add(calibrationKey);
-    setDraftPct(raw);
-    if (syncTimerRef.current !== null) {
-      window.clearTimeout(syncTimerRef.current);
-      syncTimerRef.current = null;
-    }
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      const keysToRemove = Array.from(
-        new Set([calibrationKey, matchedCalibration?.key].filter((k): k is string => Boolean(k)))
-      );
-      const delSeqMap = new Map<string, number>();
-      const deletedAtMs = Date.now();
-      const deletedAtIso = new Date(deletedAtMs).toISOString();
-      for (const k of keysToRemove) {
-        delSeqMap.set(k, bumpKeySeq(k));
-        deletedAtByKeyRef.current.set(k, deletedAtMs);
-      }
-      setCalibrations((prev) => {
-        const next = { ...prev };
-        let changed = false;
-        for (const k of keysToRemove) {
-          if (k in next) {
-            delete next[k];
-            changed = true;
-          }
-        }
-        if (!changed) return prev;
-        writeStoredJson(calStoreKey, next);
-        return next;
-      });
-      syncTimerRef.current = window.setTimeout(() => {
-        isUserEditingRef.current = false;
-        for (const k of keysToRemove) {
-          const reqSeq = delSeqMap.get(k);
-          void fetch(`/api/calibrations?${srcQ ? `${srcQ}&` : ""}key=${encodeURIComponent(k)}&at=${encodeURIComponent(deletedAtIso)}`, { method: "DELETE" })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((payload) => syncAuthoritativeKey(k, reqSeq, payload))
-            .catch(() => undefined);
-        }
-      }, 250);
-      return;
-    }
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed >= 100) return;
-    const reqKey = calibrationKey;
-    const reqSeq = bumpKeySeq(reqKey);
-    deletedAtByKeyRef.current.delete(reqKey);
-    const entry: WeeklyQuotaCalibration = {
-      remainingPct: parsed,
-      calibratedCostUsd: totals.estimatedCostUsd,
-      calibratedTokens: totals.totalTokens,
-      calibratedAt: new Date().toISOString(),
-    };
-    setCalibrations((prev) => {
-      const next = { ...prev, [reqKey]: entry };
-      writeStoredJson(calStoreKey, next);
-      return next;
-    });
-    syncTimerRef.current = window.setTimeout(() => {
-      isUserEditingRef.current = false;
-      void fetch(calUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: reqKey, source: "manual", ...entry }),
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((payload) => syncAuthoritativeKey(reqKey, reqSeq, payload))
-        .catch(() => undefined);
-    }, 300);
-  };
+  const {
+    isWeeklyPoolView,
+    canWriteWeeklyCalibration,
+    calibrationSyncError,
+    activeCalibration,
+    weeklyProjection,
+    draftPct,
+    handleRemainingPctChange,
+    onDraftBlur,
+  } = useWeeklyCalibration({
+    totals,
+    activePoolKey,
+    quotaWindow,
+    liveQuota,
+    isWorkspaceFiltered,
+    activeSource,
+  });
 
   // 0.1. 计算输入/缓存/输出占比与思考占比，防止除零
   const safeTotal = Math.max(1, totals.totalTokens); // 总量安全分母
@@ -729,15 +431,13 @@ export const KpiCards = memo(function KpiCards({
                       ? calibrationSyncError
                       : canWriteWeeklyCalibration
                         ? undefined
-                        : "历史周视图或同步中仅支持只读查看，切回当前 7d 整池可修改校准"
+                        : "仅当前 7d 整池可编辑"
                   }
-                  aria-label="输入官方周剩余百分比以反算周满额"
+                  aria-label="输入官方周剩余百分比"
                   placeholder="--"
                   value={draftPct}
                   onChange={(e) => handleRemainingPctChange(e.target.value)}
-                  onBlur={() => {
-                    isUserEditingRef.current = false;
-                  }}
+                  onBlur={onDraftBlur}
                   className="h-5 w-11 px-1 text-center font-mono text-[11px] tabular-nums"
                 />
                 <span>%</span>
@@ -780,7 +480,7 @@ export const KpiCards = memo(function KpiCards({
                 </span>
               ) : (
                 <span className="truncate text-[10px] text-slate-400 dark:text-slate-500">
-                  填剩余%反算满额
+                  填%反算
                 </span>
               )}
             </div>

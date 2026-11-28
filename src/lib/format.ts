@@ -1,31 +1,19 @@
 /**
- * Input: @/types/telemetry 中的 DashboardSummaryPayload、ConversationDetail、StepUsageRecord 与 ModelPriceRate 类型定义。
- * Output: 导出 Token 数量、精确整数、USD 金额、百分比、耗时、本地时间格式化函数，会话单步缓存率序列构造、上下文水位评估、周配额满额反算，以及自定义单价持久化与全量重算纯函数。
- * Pos: 前端通用数值格式化与等效 API 成本实时重算核心工具模块（src/lib/format.ts）。
+ * Input: @/types/telemetry 中的 CallNodePoint、ModelUsageBreakdown、QuotaResetEvent、StepUsageRecord、UsageTimeBucket 与 WeeklyQuotaCalibration 类型定义。
+ * Output: 导出 Token/金额/百分比/耗时/时间格式化函数、日历与今日摘要工具、会话单步缓存率序列构造、上下文水位评估及周配额满额反算纯函数。
+ * Pos: 前端通用数值/时间格式化与图表数据纯函数工具模块（src/lib/format.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import type {
-  ConversationDetail,
-  DashboardSummaryPayload,
-  ModelPriceRate,
+  CallNodePoint,
+  ModelUsageBreakdown,
   QuotaResetEvent,
   StepUsageRecord,
+  UsageTimeBucket,
   WeeklyQuotaCalibration,
 } from "@/types/telemetry";
 
 export type { WeeklyQuotaCalibration };
-
-/** 浏览器端持久化用户自定义单价表的 localStorage 键名 */
-export const CUSTOM_PRICING_STORAGE_KEY = "agy_custom_pricing_v1";
-
-/** 兜底默认单价配置（当单价列表为空时使用） */
-const FALLBACK_PRICE_RATE: ModelPriceRate = {
-  modelPattern: "*",
-  label: "Default Fallback",
-  inputPerMillion: 2.0,
-  cacheReadPerMillion: 0.1,
-  outputPerMillion: 10,
-};
 
 /**
  * 职责：将整数格式化为带千分位逗号的精确字符串。
@@ -497,287 +485,106 @@ export function formatCycleCountdown(ms: number): string {
   return `${mins}m`;
 }
 
-/**
- * 职责：根据模型标识文本匹配最具体的单价规则（优先最长子串匹配，兜底通配规则）。
- * 参数：modelText — 模型名称或 ID 组合字符串；rates — 候选单价表。
- * 返回值：命中的 ModelPriceRate 配置项。
- */
-export function matchModelPriceRate(
-  modelText: string,
-  rates: ModelPriceRate[]
-): ModelPriceRate {
-  // 0. 空表直接返回内置兜底费率
-  if (!rates || rates.length === 0) return FALLBACK_PRICE_RATE;
-  const norm = (s: string) =>
-    (s || "").toLowerCase().replace(/(\d)[-_](\d)/g, "$1.$2").replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
-  const normalized = norm(modelText); // 统一归一化便于兼容 opus-5-5 与 Opus 5.5
-  let bestMatch: ModelPriceRate | null = null; // 记录最长模式命中的具体规则
-  let bestPatternLen = -1;
-  let wildcardMatch: ModelPriceRate | null = null; // 记录通配兜底规则
+const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]; // 星期名称
 
-  // 1.1. 遍历单价表区分通配符与具体关键字规则
-  for (const rate of rates) {
-    const pattern = norm(rate.modelPattern);
-    if (!pattern || pattern === "*" || pattern === "default") {
-      wildcardMatch = rate;
-      continue;
-    }
-    if (normalized.includes(pattern) && pattern.length > bestPatternLen) {
-      bestMatch = rate;
-      bestPatternLen = pattern.length;
-    }
+/**
+ * 职责：将 Date 实例格式化为本地时区 YYYY-MM-DD 字符串。
+ * 参数：d — Date 实例。
+ * 返回值：YYYY-MM-DD 日期键。
+ */
+export function toLocalDayKey(d: Date): string {
+  // 0. 补齐两位月与日拼接为本地日期键
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * 职责：根据 YYYY-MM-DD 日期键解析本地星期标签与是否今日标记。
+ * 参数：bucketKey — YYYY-MM-DD 格式日期字符串；todayKey — 今日 YYYY-MM-DD 键。
+ * 返回值：包含 weekdayLabel 与 isToday 的对象。
+ */
+export function resolveDayMeta(
+  bucketKey: string,
+  todayKey: string
+): { weekdayLabel: string; isToday: boolean } {
+  // 0. 对比今日日期键并计算星期几
+  const isToday = bucketKey === todayKey;
+  const parts = bucketKey.split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) {
+    return { weekdayLabel: isToday ? "今日" : "", isToday };
   }
-  return bestMatch ?? wildcardMatch ?? rates[rates.length - 1] ?? FALLBACK_PRICE_RATE;
-}
-
-/**
- * 职责：依据单模型费率计算等效 API 调用成本与缓存节省金额。
- * 参数：inputTokens — 未缓存输入；cacheReadTokens — 缓存读取；outputTokens — 总输出；rate — 单价项。
- * 返回值：包含 estimatedCostUsd 与 cacheSavedUsd 的计算结果。
- */
-export function calculateTokenCost(
-  inputTokens: number,
-  cacheReadTokens: number,
-  outputTokens: number,
-  rate: ModelPriceRate
-): { estimatedCostUsd: number; cacheSavedUsd: number } {
-  // 0. 按百万 Token 线性折算输入、缓存读取与输出费用
-  const estimatedCostUsd =
-    (Math.max(0, inputTokens) * Math.max(0, rate.inputPerMillion) +
-      Math.max(0, cacheReadTokens) * Math.max(0, rate.cacheReadPerMillion) +
-      Math.max(0, outputTokens) * Math.max(0, rate.outputPerMillion)) /
-    1_000_000;
-  // 1.1. 缓存节省金额 = 缓存读取量 × max(0, 未缓存单价 - 缓存读取单价)
-  const unitSaved = Math.max(0, rate.inputPerMillion - rate.cacheReadPerMillion);
-  const cacheSavedUsd = (Math.max(0, cacheReadTokens) * unitSaved) / 1_000_000;
-  return { estimatedCostUsd, cacheSavedUsd };
-}
-
-/**
- * 职责：使用自定义每百万 Token 单价实时重算完整看板载荷中的成本与缓存节省指标。
- * 思路：1) 重算 byModel 并求加权混合费率；2) 重算 conversations 并按项目汇总更新 byWorkspace；3) 重算趋势桶与顶部 KPI。
- * 参数：summary — 原始服务端汇总载荷；customRates — 用户自定义单价列表。
- * 返回值：更新成本与节省金额后的新 DashboardSummaryPayload 对象。
- */
-export function recalculateSummaryWithCustomRates(
-  summary: DashboardSummaryPayload,
-  customRates: ModelPriceRate[] | null
-): DashboardSummaryPayload {
-  // 0. 未开启自定义单价时原样返回，避免多余对象拷贝
-  if (!customRates || customRates.length === 0) return summary;
-
-  // 1.1. 逐模型精确重算成本并统计全局加权费率分子
-  let weightedInSum = 0; // 加权输入单价累计分子
-  let weightedCacheSum = 0; // 加权缓存单价累计分子
-  let weightedOutSum = 0; // 加权输出单价累计分子
-  let modelCostSum = 0; // 模型维度总等效成本
-  let modelSavedSum = 0; // 模型维度总缓存节省
-
-  const byModel = summary.byModel.map((m) => {
-    const rate = matchModelPriceRate(`${m.modelName} ${m.modelId}`, customRates);
-    const { estimatedCostUsd, cacheSavedUsd } = calculateTokenCost(
-      m.inputTokens,
-      m.cacheReadTokens,
-      m.outputTokens,
-      rate
-    );
-    weightedInSum += m.inputTokens * rate.inputPerMillion;
-    weightedCacheSum += m.cacheReadTokens * rate.cacheReadPerMillion;
-    weightedOutSum += m.outputTokens * rate.outputPerMillion;
-    modelCostSum += estimatedCostUsd;
-    modelSavedSum += cacheSavedUsd;
-    return { ...m, estimatedCostUsd, cacheSavedUsd };
-  });
-
-  // 1.2. 构造全局混合费率供无模型拆分的趋势桶使用
-  const defaultRate = matchModelPriceRate("*", customRates);
-  const blendedRate: ModelPriceRate = {
-    modelPattern: "*",
-    label: "Blended",
-    inputPerMillion:
-      summary.totals.inputTokens > 0
-        ? weightedInSum / summary.totals.inputTokens
-        : defaultRate.inputPerMillion,
-    cacheReadPerMillion:
-      summary.totals.cacheReadTokens > 0
-        ? weightedCacheSum / summary.totals.cacheReadTokens
-        : defaultRate.cacheReadPerMillion,
-    outputPerMillion:
-      summary.totals.outputTokens > 0
-        ? weightedOutSum / summary.totals.outputTokens
-        : defaultRate.outputPerMillion,
+  const dateObj = new Date(parts[0], parts[1] - 1, parts[2]);
+  const weekday = WEEKDAY_NAMES[dateObj.getDay()] ?? "";
+  return {
+    weekdayLabel: isToday ? `今日·${weekday}` : weekday,
+    isToday,
   };
+}
 
-  // 2.1. 重算会话列表并按工作区聚合精确项目成本
-  const workspaceCostMap = new Map<string, number>(); // 工作区键 -> 汇总成本
-  let convCostSum = 0; // 会话维度累计成本（供空模型表时兜底）
-  let convSavedSum = 0; // 会话维度累计节省
-
-  const conversations = summary.conversations.map((conv) => {
-    const rate = matchModelPriceRate(
-      `${conv.primaryModel} ${conv.models.join(" ")}`,
-      customRates
-    );
-    const { estimatedCostUsd, cacheSavedUsd } = calculateTokenCost(
-      conv.inputTokens,
-      conv.cacheReadTokens,
-      conv.outputTokens,
-      rate
-    );
-    const wsKey = conv.workspaceName || "临时对话";
-    workspaceCostMap.set(wsKey, (workspaceCostMap.get(wsKey) ?? 0) + estimatedCostUsd);
-    convCostSum += estimatedCostUsd;
-    convSavedSum += cacheSavedUsd;
-    return { ...conv, estimatedCostUsd, cacheSavedUsd };
+/**
+ * 职责：筛选自然今日的调用节点并按模型汇总，供「今日」模式折线图复用（当 callTimeline 因 nodeLimit 仅含尾部节点时，自动用 dailyTrend 今日桶补齐真实全天轮数与分模型累计值）。
+ * 参数：callTimeline — 调用节点序列；byModel — 周期内分模型汇总；dailyTrend — 可选按日趋势桶（用于还原受 nodeLimit 截断的今日全量计数与模型汇总）。
+ * 返回值：包含 todayNodes、todayByModel 与 todayTotalCalls 的对象。
+ */
+export function extractTodayCallSummary(
+  callTimeline: CallNodePoint[],
+  byModel: ModelUsageBreakdown[],
+  dailyTrend?: UsageTimeBucket[]
+): { todayNodes: CallNodePoint[]; todayByModel: ModelUsageBreakdown[]; todayTotalCalls: number } {
+  const todayKey = toLocalDayKey(new Date());
+  const matchedNodes = callTimeline.filter((n) => {
+    const parsed = new Date(n.timestamp);
+    return !Number.isNaN(parsed.getTime()) && toLocalDayKey(parsed) === todayKey;
   });
-
-  // 2.2. 更新工作区拆解与日/小时趋势序列
-  const byWorkspace = summary.byWorkspace.map((ws) => {
-    const wsKey = ws.workspaceName || "临时对话";
-    const mapped = workspaceCostMap.get(wsKey);
-    const fallback = calculateTokenCost(
-      ws.inputTokens,
-      ws.cacheReadTokens,
-      ws.outputTokens,
-      blendedRate
-    ).estimatedCostUsd;
-    return { ...ws, estimatedCostUsd: mapped ?? fallback };
-  });
-
-  const dailyTrend = summary.dailyTrend.map((b) => {
-    const models = b.models
-      ?.map((m) => {
-        const mRate = matchModelPriceRate(`${m.modelName} ${m.modelId}`, customRates);
-        const { estimatedCostUsd } = calculateTokenCost(
-          m.inputTokens,
-          m.cacheReadTokens,
-          m.outputTokens,
-          mRate
-        );
-        return { ...m, estimatedCostUsd };
-      })
-      .sort((a, m2) => m2.estimatedCostUsd - a.estimatedCostUsd || m2.totalTokens - a.totalTokens);
-    const estimatedCostUsd =
-      models && models.length > 0
-        ? models.reduce((acc, m) => acc + m.estimatedCostUsd, 0)
-        : calculateTokenCost(b.inputTokens, b.cacheReadTokens, b.outputTokens, blendedRate)
-            .estimatedCostUsd;
+  const todayBucket = dailyTrend?.find((b) => b.bucketKey === todayKey);
+  const todayTotalCalls = Math.max(matchedNodes.length, todayBucket?.callCount ?? 0);
+  const toBreakdown = (
+    modelName: string,
+    s: { modelId?: string; callCount?: number; inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd?: number }
+  ): ModelUsageBreakdown => {
+    const ref = byModel.find((item) => item.modelName === modelName);
+    const promptSum = s.inputTokens + s.cacheReadTokens;
     return {
-      ...b,
-      estimatedCostUsd,
-      models,
+      modelName,
+      modelId: s.modelId || ref?.modelId || modelName,
+      conversationCount: 0,
+      callCount: s.callCount ?? 0,
+      inputTokens: s.inputTokens,
+      cacheReadTokens: s.cacheReadTokens,
+      outputTokens: s.outputTokens,
+      thinkingTokens: 0,
+      responseTokens: 0,
+      totalTokens: s.totalTokens,
+      cacheHitRate: promptSum > 0 ? s.cacheReadTokens / promptSum : 0,
+      avgLatencyMs: 0,
+      avgOutputTps: ref?.avgOutputTps ?? 0,
+      avgStreamingTps: ref?.avgStreamingTps ?? 0,
+      estimatedCostUsd: s.estimatedCostUsd ?? 0,
+      cacheSavedUsd: 0,
+      shareOfTotalTokens: 0,
     };
-  });
-
-  const hourlyTrend = summary.hourlyTrend.map((b) => ({
-    ...b,
-    estimatedCostUsd: calculateTokenCost(
-      b.inputTokens,
-      b.cacheReadTokens,
-      b.outputTokens,
-      blendedRate
-    ).estimatedCostUsd,
-  }));
-
-  // 3.1. 更新顶部全局汇总指标与今日估算成本
-  const totalEstimatedCostUsd = byModel.length > 0 ? modelCostSum : convCostSum;
-  const totalCacheSavedUsd = byModel.length > 0 ? modelSavedSum : convSavedSum;
-  const now = new Date();
-  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; // 本地今日日期键
-  const todayBucket = dailyTrend.find((b) => b.bucketKey === todayKey);
-  const costScale =
-    summary.totals.estimatedCostUsd > 0
-      ? totalEstimatedCostUsd / summary.totals.estimatedCostUsd
-      : 1;
-  const todayEstimatedCostUsd =
-    summary.totals.todayTotalTokens <= 0
-      ? 0
-      : todayBucket
-        ? todayBucket.estimatedCostUsd
-        : summary.totals.todayEstimatedCostUsd * costScale;
-
-  return {
-    ...summary,
-    totals: {
-      ...summary.totals,
-      estimatedCostUsd: totalEstimatedCostUsd,
-      cacheSavedUsd: totalCacheSavedUsd,
-      todayEstimatedCostUsd,
-    },
-    dailyTrend,
-    hourlyTrend,
-    byModel,
-    byWorkspace,
-    conversations,
   };
-}
 
-/**
- * 职责：使用自定义单价重算单个会话详情弹窗内的单步成本与汇总成本。
- * 参数：detail — 会话详情数据；customRates — 自定义单价表。
- * 返回值：重算后的 ConversationDetail。
- */
-export function recalculateDetailWithCustomRates(
-  detail: ConversationDetail,
-  customRates: ModelPriceRate[] | null
-): ConversationDetail {
-  // 0. 无自定义单价直接返回原详情
-  if (!customRates || customRates.length === 0) return detail;
-  let sumCost = 0; // 单步成本累计
-  let sumSaved = 0; // 单步节省累计
-  // 1.1. 逐个推理步骤匹配单价并重算
-  const steps = detail.steps.map((step) => {
-    const rate = matchModelPriceRate(`${step.modelName} ${step.modelId}`, customRates);
-    const { estimatedCostUsd, cacheSavedUsd } = calculateTokenCost(
-      step.inputTokens,
-      step.cacheReadTokens,
-      step.outputTokens,
-      rate
-    );
-    sumCost += estimatedCostUsd;
-    sumSaved += cacheSavedUsd;
-    return { ...step, estimatedCostUsd, cacheSavedUsd };
-  });
+  if (todayBucket?.models && todayBucket.models.length > 0 && todayBucket.callCount > matchedNodes.length) {
+    return {
+      todayNodes: matchedNodes,
+      todayByModel: todayBucket.models.map((m) => toBreakdown(m.modelName, m)),
+      todayTotalCalls,
+    };
+  }
+
+  const modelStatsMap = new Map<string, { inputTokens: number; cacheReadTokens: number; outputTokens: number; totalTokens: number }>();
+  for (const n of matchedNodes) {
+    const cur = modelStatsMap.get(n.modelName) ?? { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
+    cur.inputTokens += n.inputTokens;
+    cur.cacheReadTokens += n.cacheReadTokens;
+    cur.outputTokens += n.outputTokens;
+    cur.totalTokens += n.totalTokens;
+    modelStatsMap.set(n.modelName, cur);
+  }
   return {
-    ...detail,
-    steps,
-    estimatedCostUsd: steps.length > 0 ? sumCost : detail.estimatedCostUsd,
-    cacheSavedUsd: steps.length > 0 ? sumSaved : detail.cacheSavedUsd,
+    todayNodes: matchedNodes,
+    todayByModel: [...modelStatsMap.entries()].map(([name, stats]) => toBreakdown(name, stats)),
+    todayTotalCalls,
   };
-}
-
-/**
- * 职责：从浏览器 localStorage 安全读取用户自定义单价配置。
- * 参数：无。
- * 返回值：有效的 ModelPriceRate 数组，未设置或解析失败时返回 null。
- */
-export function loadCustomPricingFromStorage(): ModelPriceRate[] | null {
-  // 0. 捕获隐私模式或 JSON 损坏异常
-  try {
-    const raw = window.localStorage.getItem(CUSTOM_PRICING_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return parsed as ModelPriceRate[];
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 职责：将自定义单价写入或清除出浏览器 localStorage。
- * 参数：rates — 待保存的单价数组，传入 null 时清空自定义配置并恢复默认。
- * 返回值：无。
- */
-export function saveCustomPricingToStorage(rates: ModelPriceRate[] | null): void {
-  // 0. 写入或移除键值并忽略存储配额异常
-  try {
-    if (!rates || rates.length === 0) {
-      window.localStorage.removeItem(CUSTOM_PRICING_STORAGE_KEY);
-    } else {
-      window.localStorage.setItem(CUSTOM_PRICING_STORAGE_KEY, JSON.stringify(rates));
-    }
-  } catch {
-    // 忽略受限浏览器环境下的存储异常
-  }
 }
