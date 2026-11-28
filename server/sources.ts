@@ -16,6 +16,7 @@ export interface DiscoveredDataSource {
   label: string; // 界面可读名称
   kind: DataSourceKind; // 数据源分类
   dataDir: string; // AntiGravity 主数据目录绝对路径
+  profileDir?: string; // T3 Code 实例隔离根目录（GEMINI_HOME，包含 antigravity-acp 与 antigravity-cli）
   extraDataDirs?: string[]; // 按同 Google 账号自动归并进来的额外本地数据目录（如原生 App / CLI）
   stateDir?: string; // 该数据源独立状态目录（用于隔离周校准与重置记录）
   liveQuotaPath?: string; // 明确绑定的官方 live-quota.json 路径（仅绑给与 agy 钥匙串同账号的源，绝不串号）
@@ -52,8 +53,8 @@ function normalizeEmail(raw: unknown): string | undefined {
   return SIMPLE_EMAIL_RE.test(cleaned) ? cleaned : undefined;
 }
 
-/** 仅读取单个普通 .log 文件前 32KB 并匹配启动认证日志中的账号邮箱（绝不碰任何凭证/token 文件） */
-function readEmailFromLogHead(filePath: string): string | undefined {
+/** 仅读取单个普通 .log 文件前 32KB 并提取启动认证邮箱与是否启用文件隔离存储（绝不碰任何凭证/token 文件） */
+function readLogAuthHint(filePath: string): { email: string; isolatedFileStorage: boolean } | undefined {
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, "r");
@@ -62,7 +63,9 @@ function readEmailFromLogHead(filePath: string): string | undefined {
     if (bytesRead <= 0) return undefined;
     const text = buf.subarray(0, bytesRead).toString("utf8");
     const m = text.match(AUTH_EMAIL_RE);
-    return m ? normalizeEmail(m[1]) : undefined;
+    const email = m ? normalizeEmail(m[1]) : undefined;
+    if (!email) return undefined;
+    return { email, isolatedFileStorage: text.includes("Using file-based token storage") };
   } catch {
     return undefined;
   } finally {
@@ -76,9 +79,24 @@ function readEmailFromLogHead(filePath: string): string | undefined {
   }
 }
 
+/** 从投票桶中选出票数最高（平票取最新）的邮箱 */
+function pickMajorityEmail(counts: Map<string, { count: number; firstIndex: number }>): string | undefined {
+  let winner = "";
+  let bestCount = -1;
+  let bestFirst = Infinity;
+  for (const [email, stat] of counts.entries()) {
+    if (stat.count > bestCount || (stat.count === bestCount && stat.firstIndex < bestFirst)) {
+      winner = email;
+      bestCount = stat.count;
+      bestFirst = stat.firstIndex;
+    }
+  }
+  return winner || undefined;
+}
+
 /**
  * 职责：从候选数据目录的普通启动日志（cli.log / log/*.log）只读推断归属 Google 账号邮箱。
- * 思路：抽样最新最多 20 份日志做多数投票（平票取最新），避免单次 CLI/升级串号日志覆盖账号真实归属。
+ * 思路：抽样最新最多 50 份日志做多数投票（优先采纳明确启用文件隔离存储的日志，免疫 agy 1.5.16~1.5.18 钥匙串回退串号）。
  * 参数：dirs — 按优先级排列的数据目录列表。
  * 返回值：规范化小写邮箱，无法推断时返回 undefined。
  */
@@ -87,8 +105,8 @@ export function detectAccountEmailFromLogs(dirs: string[]): string | undefined {
     if (!dir || !fs.existsSync(dir)) continue;
     const directCliLog = path.join(dir, "cli.log");
     if (fs.existsSync(directCliLog)) {
-      const hit = readEmailFromLogHead(directCliLog);
-      if (hit) return hit;
+      const hit = readLogAuthHint(directCliLog);
+      if (hit) return hit.email;
     }
     const logDir = path.join(dir, "log");
     if (!fs.existsSync(logDir)) continue;
@@ -97,28 +115,22 @@ export function detectAccountEmailFromLogs(dirs: string[]): string | undefined {
         .readdirSync(logDir)
         .filter((name) => name.endsWith(".log"))
         .sort((a, b) => b.localeCompare(a))
-        .slice(0, 20);
-      const counts = new Map<string, { count: number; firstIndex: number }>();
+        .slice(0, 50);
+      const isolatedCounts = new Map<string, { count: number; firstIndex: number }>();
+      const allCounts = new Map<string, { count: number; firstIndex: number }>();
       for (let i = 0; i < files.length; i += 1) {
-        const hit = readEmailFromLogHead(path.join(logDir, files[i]));
+        const hit = readLogAuthHint(path.join(logDir, files[i]));
         if (!hit) continue;
-        const cur = counts.get(hit);
-        if (cur) cur.count += 1;
-        else counts.set(hit, { count: 1, firstIndex: i });
+        const addVote = (map: Map<string, { count: number; firstIndex: number }>) => {
+          const cur = map.get(hit.email);
+          if (cur) cur.count += 1;
+          else map.set(hit.email, { count: 1, firstIndex: i });
+        };
+        addVote(allCounts);
+        if (hit.isolatedFileStorage) addVote(isolatedCounts);
       }
-      if (counts.size > 0) {
-        let winner = "";
-        let bestCount = -1;
-        let bestFirst = Infinity;
-        for (const [email, stat] of counts.entries()) {
-          if (stat.count > bestCount || (stat.count === bestCount && stat.firstIndex < bestFirst)) {
-            winner = email;
-            bestCount = stat.count;
-            bestFirst = stat.firstIndex;
-          }
-        }
-        if (winner) return winner;
-      }
+      const winner = pickMajorityEmail(isolatedCounts) ?? pickMajorityEmail(allCounts);
+      if (winner) return winner;
     } catch {
       /* 忽略无权限日志目录 */
     }
@@ -304,6 +316,7 @@ export function discoverLocalDataSources(
           label,
           kind: "t3",
           dataDir: acpDir,
+          profileDir: path.join(t3ProvidersDir, ent.name),
           stateDir: path.join(stateRoot, "sources", sanitizeSourceSlug(id)),
           ...(accountEmail ? { accountEmail } : {}),
         });

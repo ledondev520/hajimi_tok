@@ -362,6 +362,7 @@ function serveStaticOrFallback(
   staticDir: string | undefined,
   res: http.ServerResponse,
   trustedOrigin: string | null = null,
+  req?: http.IncomingMessage,
 ): void {
   // 0. 若未配置静态目录或目录不存在，直接返回 404 JSON
   if (!staticDir || !fs.existsSync(staticDir) || !fs.statSync(staticDir).isDirectory()) {
@@ -408,9 +409,23 @@ function serveStaticOrFallback(
     }
     const ext = path.extname(realCandidate).toLowerCase();
     const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+    const isHashedAsset = realRel.startsWith(`assets${path.sep}`) || realRel.startsWith("assets/");
+    const rawBuf = fs.readFileSync(realCandidate);
+    const acceptEnc = String(req?.headers["accept-encoding"] || "");
+    const headers: Record<string, string> = {
+      "Content-Type": contentType,
+      "Cache-Control": isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache",
+    };
     setCorsHeaders(res, trustedOrigin);
-    res.writeHead(200, { "Content-Type": contentType });
-    res.end(fs.readFileSync(realCandidate));
+    if (rawBuf.length >= 16_384 && /\bgzip\b/i.test(acceptEnc) && (ext === ".js" || ext === ".css" || ext === ".svg")) {
+      headers["Content-Encoding"] = "gzip";
+      headers.Vary = trustedOrigin ? "Origin, Accept-Encoding" : "Accept-Encoding";
+      res.writeHead(200, headers);
+      res.end(zlib.gzipSync(rawBuf, { level: 1 }));
+      return;
+    }
+    res.writeHead(200, headers);
+    res.end(rawBuf);
     return;
   }
 
@@ -424,7 +439,7 @@ function serveStaticOrFallback(
       return;
     }
     setCorsHeaders(res, trustedOrigin);
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
     res.end(fs.readFileSync(realIndex));
     return;
   }
@@ -764,7 +779,7 @@ export function createTelemetryHttpServer(
       }
 
       // 2. 非 API GET 请求交由静态目录托管或 SPA 回退处理
-      serveStaticOrFallback(req.url ?? "/", options?.staticDir, res, trustedOrigin);
+      serveStaticOrFallback(req.url ?? "/", options?.staticDir, res, trustedOrigin, req);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!res.headersSent) {

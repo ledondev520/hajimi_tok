@@ -17,6 +17,7 @@ npm run update           # 手动更新（常驻服务已内置每 10 分钟静�
 npm run service:status   # 查看服务状态（另有 service:restart / service:stop）
 npm run stats            # 终端汇总（支持 --source <id> / --days 7 / --workspace <name> / --json）
 npm run dev              # 开发热更新（:5173）
+npm run statusline:login -- "账号名"   # 为第二/多个 T3 账号单独启动隔离 agy CLI 登录，开启该账号的官方周剩自动同步
 npm run hook:compact:install   # 手动安装/重装 400K 上下文 /compact 软提醒全局 Hook（service:install 已默认无侵入自动安装；hook:compact:uninstall 卸载）
 ```
 

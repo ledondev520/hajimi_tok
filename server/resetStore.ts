@@ -506,14 +506,15 @@ export function createCalibrationStore(customPath?: string) {
 }
 
 /**
- * 职责：只读解析由 scripts/statusline-bridge.mjs 写入的 ~/.hamiji-sta/live-quota.json。
- * 思路：文件不存在、解析失败或超过 7 天过期时静默返回空对象，不影响纯桌面端用户。
- * 参数：customPath — 可选显式路径（供单测隔离）。
+ * 职责：只读解析由 scripts/statusline-bridge.mjs 写入的 live-quota.json。
+ * 思路：文件不存在、解析失败、超过 7 天过期，或文件记录的 accountEmail 与预期账号不符时静默返回空对象，彻底杜绝串号。
+ * 参数：customPath — 可选显式路径；nowMs — 当前时间；expectedAccountEmail — 可选预期小写邮箱校验。
  * 返回值：poolKey -> LivePoolQuotaSnapshot 映射。
  */
 export function readLiveQuotaSnapshots(
   customPath?: string,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  expectedAccountEmail?: string
 ): Record<string, LivePoolQuotaSnapshot> {
   const filePath =
     customPath ||
@@ -522,9 +523,13 @@ export function readLiveQuotaSnapshots(
   if (!fs.existsSync(filePath)) return {};
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      accountEmail?: unknown;
       pools?: Record<string, Record<string, unknown>>;
     };
     if (!parsed || typeof parsed.pools !== "object" || !parsed.pools) return {};
+    const expected = expectedAccountEmail?.trim().toLowerCase();
+    const actual = typeof parsed.accountEmail === "string" ? parsed.accountEmail.trim().toLowerCase() : "";
+    if (expected && actual && actual !== expected) return {};
     const out: Record<string, LivePoolQuotaSnapshot> = {};
     const cutoffMs = nowMs - 7 * 86_400_000;
     for (const [poolKey, item] of Object.entries(parsed.pools)) {

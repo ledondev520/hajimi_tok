@@ -196,6 +196,7 @@ export interface TelemetryServiceOptions {
   sharedResetsPath?: string; // 可选公共强制重置种子文件路径（多账号模式下显式透传仓库 shared-resets.json）
   calibrationsPath?: string; // 可选自定义 calibrations.json 路径
   liveQuotaPath?: string; // 可选自定义 live-quota.json 路径
+  expectedAccountEmail?: string; // 可选预期账号邮箱（防 live-quota.json 串号）
   useEnvAnchors?: boolean; // 是否读取环境变量锚点（默认非隔离态启用）
   scanner?: ReturnType<typeof createTelemetryScanner>; // 可选外部注入扫描器（供多源聚合复用缓存避免重复扫盘）
 }
@@ -648,7 +649,7 @@ export function createTelemetryService(
       // 3.2. 读取官方 statusLine 实时周剩余快照，并在服务端对齐“采样时刻的整池累计消耗”作为校准分母
       const rawLiveQuota =
         !isolated || serviceOpts.liveQuotaPath
-          ? readLiveQuotaSnapshots(serviceOpts.liveQuotaPath, nowMs)
+          ? readLiveQuotaSnapshots(serviceOpts.liveQuotaPath, nowMs, serviceOpts.expectedAccountEmail)
           : {};
       const liveQuota: typeof rawLiveQuota = {};
       for (const [poolKey, snap] of Object.entries(rawLiveQuota)) {

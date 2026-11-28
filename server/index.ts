@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { createMultiSourceTelemetryService } from "./multiSource";
 import { createTelemetryHttpServer, resolveUpdateServiceAction } from "./app";
+import { discoverLocalDataSources } from "./sources";
 
 const PORT = Number(process.env.PORT || 4318); // 主 HTTP 监听端口
 const COMPAT_DEV_PORT = 5173; // 兼容旧浏览器书签的本地端口（空闲时自动挂载）
@@ -131,11 +132,11 @@ function findAgyBinary(): string | null {
 }
 
 /**
- * 职责：确认 agy CLI 已启用本项目的 statusline-bridge 桥接配置，避免对未接入或自定义 statusLine 的用户静默调用 agy。
+ * 职责：确认指定 settings.json 已启用本项目的 statusline-bridge 桥接配置，避免对未接入或自定义 statusLine 的用户静默调用 agy。
  */
-function isAgyBridgeEnabled(): boolean {
+function isAgyBridgeEnabled(settingsPath = AGY_SETTINGS_PATH): boolean {
   try {
-    const parsed = JSON.parse(fs.readFileSync(AGY_SETTINGS_PATH, "utf8")) as {
+    const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
       statusLine?: { enabled?: boolean; command?: unknown };
     };
     const sl = parsed?.statusLine;
@@ -151,8 +152,36 @@ function isAgyBridgeEnabled(): boolean {
   }
 }
 
+/** 收集全部已启用 statusline-bridge 桥接的同步目标（原生钥匙串 + 已单独登录隔离 CLI 的 T3 账号） */
+function resolveAgyQuotaSyncTargets(): Array<{ env: NodeJS.ProcessEnv }> {
+  const targets: Array<{ env: NodeJS.ProcessEnv }> = [];
+  if (isAgyBridgeEnabled(AGY_SETTINGS_PATH)) {
+    const env: NodeJS.ProcessEnv = { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "true" };
+    delete env.GEMINI_HOME;
+    delete env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE;
+    delete env.AGY_ACP_FORCE_FILE_STORAGE;
+    targets.push({ env });
+  }
+  for (const src of discoverLocalDataSources({ customDataDir: process.env.AGY_DATA_DIR })) {
+    if (src.kind !== "t3" || !src.profileDir || !src.stateDir) continue;
+    const cliSettings = path.join(src.profileDir, "antigravity-cli", "settings.json");
+    if (!isAgyBridgeEnabled(cliSettings)) continue;
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      GEMINI_HOME: src.profileDir,
+      AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1",
+      AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+      AGY_LIVE_QUOTA_FILE: path.join(src.stateDir, "live-quota.json"),
+    };
+    delete env.SSH_CONNECTION;
+    delete env.AGY_ACP_FORCE_FILE_STORAGE;
+    targets.push({ env });
+  }
+  return targets;
+}
+
 /**
- * 职责：仅当本机装有 agy CLI 且启用了本桥接时，每 10 分钟零 Token 静默运行一次 `agy models` 触发官方 statusLine 刷新周剩配额。
+ * 职责：当本机装有 agy CLI 且存在已启用本桥接的账号时，每 10 分钟零 Token 串行静默运行 `agy models` 触发官方 statusLine 刷新各账号周剩配额。
  */
 function startAgyQuotaSyncLoop(): () => void {
   if (!IS_CANONICAL_PROD_INSTANCE) {
@@ -160,18 +189,25 @@ function startAgyQuotaSyncLoop(): () => void {
   }
   let running = false;
   const runOnce = () => {
-    if (running || !isAgyBridgeEnabled()) return;
+    if (running) return;
     const agyBin = findAgyBinary();
     if (!agyBin) return;
+    const targets = resolveAgyQuotaSyncTargets();
+    if (targets.length === 0) return;
     running = true;
-    execFile(
-      agyBin,
-      ["models"],
-      { cwd: os.tmpdir(), timeout: 25_000, maxBuffer: 512 * 1024 },
-      () => {
+    const step = (idx: number) => {
+      if (idx >= targets.length) {
         running = false;
+        return;
       }
-    );
+      execFile(
+        agyBin,
+        ["models"],
+        { cwd: os.tmpdir(), env: targets[idx].env, timeout: 25_000, maxBuffer: 512 * 1024 },
+        () => step(idx + 1)
+      );
+    };
+    step(0);
   };
   const initTimer = setTimeout(runOnce, 20_000);
   const pollTimer = setInterval(runOnce, LIVE_QUOTA_SYNC_INTERVAL_MS);

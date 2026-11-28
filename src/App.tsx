@@ -210,8 +210,17 @@ export function App() {
   const [selectedModel, setSelectedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
   const [appliedModel, setAppliedModel] = useState<string>(initViewPrefs.selectedModel ?? "");
   const [theme, setTheme] = useState<ThemeMode>(resolveInitialTheme);
-  const [summary, setSummary] = useState<DashboardSummaryPayload | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  // 首屏秒开快照（SWR）：先瞬显本地缓存的上次视图，再在后台无感拉取最新数据覆盖
+  const bootSnapshot = useMemo(() => {
+    const snap = readStoredJson<{ key?: string; data?: DashboardSummaryPayload }>(
+      "agy_dashboard_boot_snap_v1",
+      {}
+    );
+    const expectedKey = `${initViewPrefs.selectedSource ?? "all"}|${resolveInitialCycle()}|${initViewPrefs.selectedWorkspace ?? ""}|${initViewPrefs.selectedModel ?? ""}`;
+    return snap.key === expectedKey && snap.data?.totals ? snap.data : null;
+  }, [initViewPrefs]);
+  const [summary, setSummary] = useState<DashboardSummaryPayload | null>(bootSnapshot);
+  const [loading, setLoading] = useState<boolean>(bootSnapshot === null);
   const [error, setError] = useState<string | null>(null);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const activeConvIdRef = useRef<string | null>(null);
@@ -318,6 +327,10 @@ export function App() {
         const nextEtag = res.headers.get("ETag");
         if (nextEtag) etagCacheRef.current.set(cacheKey, nextEtag);
         summaryCacheRef.current.set(cacheKey, data);
+        writeStoredJson("agy_dashboard_boot_snap_v1", {
+          key: `${resolvedSource}|${cycle}|${selectedWorkspace}|${selectedModel}`,
+          data: { ...data, callTimeline: data.callTimeline.slice(-60), conversations: data.conversations.slice(0, 30) },
+        });
         if (summaryCacheRef.current.size > 24) {
           const oldest = summaryCacheRef.current.keys().next().value;
           if (oldest !== undefined) {

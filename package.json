@@ -22,6 +22,7 @@
     "service:status": "node scripts/service.mjs status",
     "update": "node scripts/update.mjs",
     "statusline:install": "node scripts/statusline-bridge.mjs --install",
+    "statusline:login": "node scripts/statusline-bridge.mjs --login",
     "hook:compact:install": "node scripts/compact-reminder-hook.mjs --install",
     "hook:compact:uninstall": "node scripts/compact-reminder-hook.mjs --uninstall"
   },

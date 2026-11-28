@@ -9,6 +9,6 @@
 - `aggregator.ts`｜KPI、模型、项目、TTL（`WeakMap` 缓存）与按需裁剪调用时间线聚合
 - `multiSource.ts`｜多账号共享扫描缓存、同账号多目录合并、单账号周剩余配额直出与分账号状态隔离编排
 - `app.ts`｜HTTP API（`/api/*`、`GET /api/sources`、`?source=`、`nodeLimit`、`ETag 304` 与大载荷 gzip）、导出与静态资源托管
-- `index.ts`｜本地常驻服务入口、多账号编排、10 分钟静默自动更新与可选 `agy` 官方周剩配额定时刷新
+- `index.ts`｜本地常驻服务入口、多账号编排、10 分钟静默自动更新与多账号 `agy` 官方周剩配额定时刷新
 - `cliRender.ts`｜终端报表参数解析（含 `--source`）与多账号表格渲染
 - `cli.ts`｜`npm run stats` 命令行入口

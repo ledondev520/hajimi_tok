@@ -239,7 +239,7 @@ function resolveSourceWeeklyQuota(
   explicitNowMs?: number
 ): DataSourceInfo["weeklyQuota"] {
   const rawLive = entry.liveQuotaPath
-    ? readLiveQuotaSnapshots(entry.liveQuotaPath, explicitNowMs ?? Date.now())
+    ? readLiveQuotaSnapshots(entry.liveQuotaPath, explicitNowMs ?? Date.now(), entry.meta.accountEmail)
     : {};
   const calibrations = entry.provider.getCalibrations?.() ?? {};
   const out: NonNullable<DataSourceInfo["weeklyQuota"]> = {};
@@ -390,6 +390,7 @@ export function createMultiSourceTelemetryService(
           }
         : {}),
       ...(resolvedLiveQuotaPath ? { liveQuotaPath: resolvedLiveQuotaPath } : {}),
+      ...(meta.accountEmail ? { expectedAccountEmail: meta.accountEmail } : {}),
     };
     return {
       meta,

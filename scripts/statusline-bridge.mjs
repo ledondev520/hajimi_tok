@@ -1,10 +1,10 @@
 /**
- * Input: Antigravity CLI (agy) 官方 statusLine 机制通过 stdin 推送的会话状态 JSON（含 quota.remaining_fraction 与 reset_time）。
- * Output: 在带唯一归属校验的跨进程锁与唯一临时文件保护下将官方精确周剩余配额原子落盘至 ~/.hamiji-sta/live-quota.json；支持 --install 精确无侵入配置。
- * Pos: 可选 agy CLI 官方 statusLine 桥接脚本，无 agy 时零侵入零运行（scripts/statusline-bridge.mjs）。
+ * Input: Antigravity CLI (agy) 官方 statusLine 机制通过 stdin 推送的会话状态 JSON（含 quota.remaining_fraction、reset_time 与 email）。
+ * Output: 在带唯一归属校验的跨进程锁保护下将官方精确周剩余配额与登录邮箱原子落盘至 live-quota.json；支持 --install、--output <path> 与 --login [账号]（按 T3 隔离 profile 登录第二账号）。
+ * Pos: 可选 agy CLI 官方 statusLine 多账号桥接脚本，无 agy 时零侵入零运行（scripts/statusline-bridge.mjs）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,9 +14,25 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const AGY_CLI_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli");
 const AGY_SETTINGS_PATH = path.join(AGY_CLI_DIR, "settings.json");
-const LIVE_QUOTA_PATH =
-  process.env.AGY_LIVE_QUOTA_FILE?.trim() ||
-  path.join(os.homedir(), ".hamiji-sta", "live-quota.json");
+
+/** 解析命令行可选 --output <path> 参数（优先于环境变量与默认 ~/.hamiji-sta/live-quota.json） */
+function resolveOutputQuotaPath(argv = process.argv.slice(2)) {
+  const idx = argv.indexOf("--output");
+  if (idx >= 0 && argv[idx + 1] && argv[idx + 1].trim()) {
+    return path.resolve(argv[idx + 1].trim());
+  }
+  const inline = argv.find((a) => a.startsWith("--output="));
+  if (inline) {
+    const val = inline.slice("--output=".length).trim();
+    if (val) return path.resolve(val);
+  }
+  return (
+    process.env.AGY_LIVE_QUOTA_FILE?.trim() ||
+    path.join(os.homedir(), ".hamiji-sta", "live-quota.json")
+  );
+}
+
+const LIVE_QUOTA_PATH = resolveOutputQuotaPath();
 const OWNED_STATUSLINE_KEYS = new Set(["type", "command", "enabled", "stack_with_default"]);
 const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
 const CORRUPT_LOCK_STALE_MS = 10_000;
@@ -335,11 +351,129 @@ async function ingestFromStdin() {
   mergeLiveQuotaFile(LIVE_QUOTA_PATH, incomingPools, accountEmail);
 }
 
+/** 解析本机 T3 Code Antigravity 实例列表（供 --login 按账号名或 sourceId 定位隔离 GEMINI_HOME） */
+function listT3AntigravityProfiles() {
+  const t3Root = process.env.T3_USERDATA_DIR?.trim() || path.join(os.homedir(), ".t3", "userdata");
+  const stateRoot = process.env.AGY_STATE_DIR?.trim() || path.join(os.homedir(), ".hamiji-sta");
+  const settingsPath = path.join(t3Root, "settings.json");
+  const providersDir = path.join(t3Root, "providers", "antigravity");
+  const labelMap = new Map();
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      for (const [key, cfg] of Object.entries(parsed?.providerInstances || {})) {
+        if (!cfg || cfg.driver !== "antigravity") continue;
+        const hash = crypto.createHash("sha256").update(key).digest("hex");
+        labelMap.set(hash, {
+          instanceKey: key,
+          label: typeof cfg.displayName === "string" && cfg.displayName.trim() ? cfg.displayName.trim() : key,
+        });
+      }
+    } catch {
+      /* 忽略配置解析异常 */
+    }
+  }
+  if (!fs.existsSync(providersDir)) return [];
+  const out = [];
+  for (const ent of fs.readdirSync(providersDir, { withFileTypes: true })) {
+    if (!ent.isDirectory()) continue;
+    const profileDir = path.join(providersDir, ent.name);
+    if (!fs.existsSync(path.join(profileDir, "antigravity-acp"))) continue;
+    const meta = labelMap.get(ent.name);
+    const id = `t3:${meta?.instanceKey || ent.name.slice(0, 8)}`;
+    const slug = id.replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "source";
+    out.push({
+      id,
+      label: meta?.label || `T3 (${ent.name.slice(0, 8)})`,
+      profileDir,
+      liveQuotaPath: path.join(stateRoot, "sources", slug, "live-quota.json"),
+    });
+  }
+  return out;
+}
+
+/** 查找本机 agy 可执行文件 */
+function findAgyBin() {
+  const defaultBin = path.join(os.homedir(), ".local", "bin", process.platform === "win32" ? "agy.exe" : "agy");
+  if (fs.existsSync(defaultBin)) return defaultBin;
+  try {
+    return execFileSync(process.platform === "win32" ? "where" : "which", ["agy"], { encoding: "utf8", timeout: 2000 }).trim().split(/\r?\n/)[0];
+  } catch {
+    return null;
+  }
+}
+
+/** 为指定 T3 隔离账号安装专属 statusLine 桥接并启动独立 agy CLI 登录以获取官方周剩余配额 */
+function runIsolatedAccountLogin(targetArg) {
+  const agyBin = findAgyBin();
+  if (!agyBin) {
+    console.error("未检测到 agy CLI（请先安装官方 agy >= 1.5.16）");
+    process.exitCode = 1;
+    return;
+  }
+  const profiles = listT3AntigravityProfiles();
+  if (profiles.length === 0) {
+    console.error("未发现任何 T3 Code Antigravity 实例目录");
+    process.exitCode = 1;
+    return;
+  }
+  const query = (targetArg || "").trim().toLowerCase();
+  const hit = query
+    ? profiles.find((p) => p.id.toLowerCase() === query || p.label.toLowerCase() === query || p.id.toLowerCase().includes(query))
+    : null;
+  if (!hit) {
+    console.log("请指定要单独接入 statusLine 周剩同步的 T3 账号名或 ID，例如：");
+    for (const p of profiles) {
+      console.log(`  npm run statusline:login -- "${p.label}"   # (${p.id})`);
+    }
+    return;
+  }
+
+  const cliDir = path.join(hit.profileDir, "antigravity-cli");
+  const cliSettingsPath = path.join(cliDir, "settings.json");
+  const expectedCmd = `"${process.execPath}" "${SCRIPT_PATH}" --output "${hit.liveQuotaPath}"`;
+  const installRes = installAgyStatuslineHook({ agyDir: cliDir, settingsPath: cliSettingsPath, expectedCmd });
+  console.log(installRes.installed ? `✓ ${installRes.reason}` : `· ${installRes.reason}`);
+
+  const env = {
+    ...process.env,
+    GEMINI_HOME: hit.profileDir,
+    AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1",
+    AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+    AGY_LIVE_QUOTA_FILE: hit.liveQuotaPath,
+  };
+  delete env.SSH_CONNECTION;
+  delete env.AGY_ACP_FORCE_FILE_STORAGE;
+
+  console.log(`\n即将以隔离文件存储模式启动「${hit.label}」(${hit.id}) 专属 agy CLI（绝不影响系统钥匙串主账号）。`);
+  console.log("请在浏览器完成该账号的 Google 登录，进入界面后按两次 Ctrl+D（或输入 /exit）退出，服务将自动每 10 分钟静默同步该账号周剩余%。\n");
+  spawnSync(agyBin, [], { cwd: os.tmpdir(), env, stdio: "inherit" });
+
+  console.log("\n正在验证该账号官方周剩余配额同步...");
+  spawnSync(agyBin, ["models"], { cwd: os.tmpdir(), env, stdio: "ignore", timeout: 25_000 });
+  if (fs.existsSync(hit.liveQuotaPath)) {
+    try {
+      const snap = JSON.parse(fs.readFileSync(hit.liveQuotaPath, "utf8"));
+      const g = snap?.pools?.["pool:gemini"]?.remainingPct;
+      const c = snap?.pools?.["pool:claude"]?.remainingPct;
+      console.log(`✓ 已写入 ${hit.liveQuotaPath} (Gemini 周剩: ${g ?? "--"}%, Claude 周剩: ${c ?? "--"}%)`);
+      return;
+    } catch {
+      /* ignore */
+    }
+  }
+  console.log("· 暂未读取到配额快照，请确认刚才已完成登录并可重试本命令。");
+}
+
 const isDirectRun =
   process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH;
 
 if (isDirectRun) {
-  if (process.argv.includes("--install")) {
+  const args = process.argv.slice(2);
+  const loginIdx = args.indexOf("--login");
+  if (loginIdx >= 0) {
+    runIsolatedAccountLogin(args[loginIdx + 1]);
+  } else if (args.includes("--install")) {
     const res = installAgyStatuslineHook();
     console.log(res.installed ? `✓ ${res.reason}` : `· ${res.reason}`);
   } else {

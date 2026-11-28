@@ -475,20 +475,18 @@ describe("Multi-Source Service, HTTP API & CLI (server/multiSource.ts)", () => {
       })
     );
 
-    // 写入非敏感启动日志标明两个 T3 账号分别属于不同邮箱（并模拟 Work Acct 偶发 1 次串号日志，验证多数投票与 T3 实例互不合并保护）
+    // 写入非敏感启动日志标明两个 T3 账号分别属于不同邮箱（并模拟 Work Acct 在 1.5.18 升级后出现多次无文件隔离标记的串号日志，验证优先采纳文件隔离存储日志）
     fs.mkdirSync(path.join(workDir, "log"), { recursive: true });
     fs.writeFileSync(
       path.join(workDir, "log", "acp-server-20261128_100001-1.log"),
-      "I1128 10:00:01 server_oauth.go:221] applyAuthResult: email=work@example.com, authMethod=consumer\n"
+      "I1128 10:00:01 composite_token_storage.go:176] Using file-based token storage because SSH session detected\nI1128 10:00:01 server_oauth.go:221] applyAuthResult: email=work@example.com, authMethod=consumer\n"
     );
-    fs.writeFileSync(
-      path.join(workDir, "log", "acp-server-20261128_100002-2.log"),
-      "I1128 10:00:02 server_oauth.go:221] applyAuthResult: email=work@example.com, authMethod=consumer\n"
-    );
-    fs.writeFileSync(
-      path.join(workDir, "log", "acp-server-20261128_100009-3.log"),
-      "I1128 10:00:09 server_oauth.go:221] applyAuthResult: email=self@example.com, authMethod=consumer\n"
-    );
+    for (let k = 2; k <= 6; k += 1) {
+      fs.writeFileSync(
+        path.join(workDir, "log", `acp-server-20261128_10000${k}-${k}.log`),
+        "I1128 10:00:09 server_oauth.go:221] applyAuthResult: email=self@example.com, authMethod=consumer\n"
+      );
+    }
     fs.mkdirSync(path.join(selfDir, "log"), { recursive: true });
     fs.writeFileSync(
       path.join(selfDir, "log", "acp-server-20261128_100000-2.log"),
@@ -619,5 +617,30 @@ describe("Multi-Source Service, HTTP API & CLI (server/multiSource.ts)", () => {
     const workCardAfter = afterManual.sources?.find((s) => s.id === "t3:work_t3");
     expect(workCardAfter?.weeklyQuota?.gemini?.source).toBe("calibrated");
     expect(workCardAfter?.weeklyQuota?.gemini?.remainingPct).toBe(75);
+
+    // 4. 若 Work Acct 自己的 live-quota.json 误写入了别人邮箱，必须拒绝读取（绝不串号）；写入匹配邮箱后立即生效
+    const workLivePath = path.join(stateRoot, "sources", "t3_work_t3", "live-quota.json");
+    fs.mkdirSync(path.dirname(workLivePath), { recursive: true });
+    fs.writeFileSync(
+      workLivePath,
+      JSON.stringify({
+        updatedAt: new Date(nowMs - 10_000).toISOString(),
+        accountEmail: "self@example.com",
+        pools: { "pool:gemini": { remainingPct: 12.3, resetTime: "", updatedAt: new Date(nowMs - 10_000).toISOString() } },
+      })
+    );
+    const mismatchedWork = service.getSummary({ source: "t3:work_t3", cycle: "7d", model: "pool:gemini", forceRefresh: true, nowMs });
+    expect(mismatchedWork.liveQuota).toBeUndefined();
+
+    fs.writeFileSync(
+      workLivePath,
+      JSON.stringify({
+        updatedAt: new Date(nowMs - 5_000).toISOString(),
+        accountEmail: "work@example.com",
+        pools: { "pool:gemini": { remainingPct: 81.5, resetTime: "", updatedAt: new Date(nowMs - 5_000).toISOString() } },
+      })
+    );
+    const matchedWork = service.getSummary({ source: "t3:work_t3", cycle: "7d", model: "pool:gemini", forceRefresh: true, nowMs });
+    expect(matchedWork.liveQuota?.["pool:gemini"]?.remainingPct).toBe(81.5);
   });
 });
