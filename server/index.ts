@@ -152,6 +152,23 @@ function isAgyBridgeEnabled(settingsPath = AGY_SETTINGS_PATH): boolean {
   }
 }
 
+/** 为隔离账号准备轻量虚拟 HOME（内含 .gemini -> T3 profileDir 符号链接），让 `agy models` 读取该账号独立 antigravity-cli 登录态 */
+function ensureIsolatedAgyHome(stateDir: string, profileDir: string): string {
+  const virtualHome = path.join(stateDir, "agy-home");
+  const geminiLink = path.join(virtualHome, ".gemini");
+  fs.mkdirSync(virtualHome, { recursive: true });
+  try {
+    if (fs.lstatSync(geminiLink).isSymbolicLink() && fs.readlinkSync(geminiLink) === profileDir) {
+      return virtualHome;
+    }
+    fs.rmSync(geminiLink, { recursive: true, force: true });
+  } catch {
+    /* 链接尚未创建 */
+  }
+  fs.symlinkSync(profileDir, geminiLink, "dir");
+  return virtualHome;
+}
+
 /** 收集全部已启用 statusline-bridge 桥接的同步目标（原生钥匙串 + 已单独登录隔离 CLI 的 T3 账号） */
 function resolveAgyQuotaSyncTargets(): Array<{ env: NodeJS.ProcessEnv }> {
   const targets: Array<{ env: NodeJS.ProcessEnv }> = [];
@@ -166,13 +183,20 @@ function resolveAgyQuotaSyncTargets(): Array<{ env: NodeJS.ProcessEnv }> {
     if (src.kind !== "t3" || !src.profileDir || !src.stateDir) continue;
     const cliSettings = path.join(src.profileDir, "antigravity-cli", "settings.json");
     if (!isAgyBridgeEnabled(cliSettings)) continue;
+    let isolatedHome: string;
+    try {
+      isolatedHome = ensureIsolatedAgyHome(src.stateDir, src.profileDir);
+    } catch {
+      continue;
+    }
     const env: NodeJS.ProcessEnv = {
       ...process.env,
-      GEMINI_HOME: src.profileDir,
+      HOME: isolatedHome,
       AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1",
       AGY_CLI_DISABLE_AUTO_UPDATE: "true",
       AGY_LIVE_QUOTA_FILE: path.join(src.stateDir, "live-quota.json"),
     };
+    delete env.GEMINI_HOME;
     delete env.SSH_CONNECTION;
     delete env.AGY_ACP_FORCE_FILE_STORAGE;
     targets.push({ env });

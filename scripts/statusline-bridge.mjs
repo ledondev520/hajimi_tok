@@ -435,22 +435,39 @@ function runIsolatedAccountLogin(targetArg) {
   const installRes = installAgyStatuslineHook({ agyDir: cliDir, settingsPath: cliSettingsPath, expectedCmd });
   console.log(installRes.installed ? `✓ ${installRes.reason}` : `· ${installRes.reason}`);
 
-  const env = {
+  const virtualHome = path.join(path.dirname(hit.liveQuotaPath), "agy-home");
+  const geminiLink = path.join(virtualHome, ".gemini");
+  fs.mkdirSync(virtualHome, { recursive: true });
+  try {
+    if (!fs.lstatSync(geminiLink).isSymbolicLink() || fs.readlinkSync(geminiLink) !== hit.profileDir) {
+      fs.rmSync(geminiLink, { recursive: true, force: true });
+      fs.symlinkSync(hit.profileDir, geminiLink, "dir");
+    }
+  } catch {
+    fs.symlinkSync(hit.profileDir, geminiLink, "dir");
+  }
+
+  const loginEnv = {
     ...process.env,
     GEMINI_HOME: hit.profileDir,
     AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1",
     AGY_CLI_DISABLE_AUTO_UPDATE: "true",
     AGY_LIVE_QUOTA_FILE: hit.liveQuotaPath,
   };
-  delete env.SSH_CONNECTION;
-  delete env.AGY_ACP_FORCE_FILE_STORAGE;
+  delete loginEnv.SSH_CONNECTION;
+  delete loginEnv.AGY_ACP_FORCE_FILE_STORAGE;
 
-  console.log(`\n即将以隔离文件存储模式启动「${hit.label}」(${hit.id}) 专属 agy CLI（绝不影响系统钥匙串主账号）。`);
-  console.log("请在浏览器完成该账号的 Google 登录，进入界面后按两次 Ctrl+D（或输入 /exit）退出，服务将自动每 10 分钟静默同步该账号周剩余%。\n");
-  spawnSync(agyBin, [], { cwd: os.tmpdir(), env, stdio: "inherit" });
+  console.log(`\n即将以隔离文件存储模式为「${hit.label}」(${hit.id}) 完成 agy CLI Google 授权（绝不影响系统钥匙串主账号）。\n`);
+  spawnSync(agyBin, ["acp", "--login", "--gemini-dir", hit.profileDir, "--app-data-dir", "antigravity-cli"], {
+    cwd: os.tmpdir(),
+    env: loginEnv,
+    stdio: "inherit",
+  });
 
+  const syncEnv = { ...loginEnv, HOME: virtualHome };
+  delete syncEnv.GEMINI_HOME;
   console.log("\n正在验证该账号官方周剩余配额同步...");
-  spawnSync(agyBin, ["models"], { cwd: os.tmpdir(), env, stdio: "ignore", timeout: 25_000 });
+  spawnSync(agyBin, ["models"], { cwd: os.tmpdir(), env: syncEnv, stdio: "ignore", timeout: 25_000 });
   if (fs.existsSync(hit.liveQuotaPath)) {
     try {
       const snap = JSON.parse(fs.readFileSync(hit.liveQuotaPath, "utf8"));
