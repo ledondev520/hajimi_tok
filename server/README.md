@@ -2,7 +2,7 @@
 
 - `protobuf.ts`｜`gen_metadata` Protobuf 零依赖解码
 - `pricing.ts`｜模型单价预设与成本计算
-- `scanner.ts`｜SQLite + `transcript.jsonl` 只读增量扫描（含 `conversation_summaries.db` 与 `-wal` 指纹复用）
+- `scanner.ts`｜SQLite + `transcript.jsonl` 只读增量扫描（含 `conversation_summaries.db` 与 `-wal` 指纹复用、git/T3/Swarm 工作树与临时目录自动归并至正式项目名）
 - `sources.ts`｜本机原生 Antigravity（含 `antigravity-cli`）与 T3 Code 多账号自动发现、同 Google 账号无侵入归并与 `live-quota.json` 精准绑定
 - `quotaCycle.ts`｜按配额池切分 5h / 7d 周期与倒计时
 - `resetStore.ts`｜合并仓库 `shared-resets.json` 与本机重置/校准/实时配额读写（支持只读公共视图）
