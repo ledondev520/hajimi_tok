@@ -17,7 +17,7 @@ export interface PersistedScanEntry {
 }
 
 interface PersistedScanCacheFile {
-  schemaVersion: number;
+  codeSig: string;
   pricingSig: string;
   dataDir: string;
   entries: Record<string, PersistedScanEntry>;
@@ -29,8 +29,28 @@ export interface PersistentScanCache {
   flushSync(): void;
 }
 
-const SCAN_CACHE_SCHEMA_VERSION = 1; // 缓存结构版本号，字段变更时自增即可自动失效旧缓存
 const SAVE_DEBOUNCE_MS = 1500; // 常驻增量更新防抖延迟，避免阻塞 HTTP 响应
+const PARSER_FILES = [
+  "scanner.ts",
+  "protobuf.ts",
+  "workspaceNormalize.ts",
+  "t3Threads.ts",
+  "pricing.ts",
+  "scanCache.ts",
+] as const;
+
+/** 自动汇总解析链路源码指纹，迭代改任何解析逻辑时自动失效旧缓存，零手工维护版本号 */
+function computeParserCodeSig(): string {
+  const parts = PARSER_FILES.map((name) => {
+    try {
+      const st = fs.statSync(path.join(import.meta.dirname, name));
+      return `${name}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      return `${name}:0`;
+    }
+  });
+  return crypto.createHash("sha1").update(parts.join("|")).digest("hex").slice(0, 16);
+}
 
 const pendingExitFlushers = new Set<() => void>();
 let exitHookRegistered = false;
@@ -63,13 +83,14 @@ export function resolveScanCachePath(stateRootDir: string, dataDir: string): str
 
 function serializePayload(
   resolvedDir: string,
+  codeSig: string,
   pricingSig: string,
   entries: Map<string, PersistedScanEntry>
 ): Buffer {
   const record: Record<string, PersistedScanEntry> = {};
   for (const [k, v] of entries.entries()) record[k] = v;
   const fileObj: PersistedScanCacheFile = {
-    schemaVersion: SCAN_CACHE_SCHEMA_VERSION,
+    codeSig,
     pricingSig,
     dataDir: resolvedDir,
     entries: record,
@@ -119,6 +140,7 @@ export function createPersistentScanCache(
   rates: ModelPriceRate[]
 ): PersistentScanCache {
   const resolvedDir = path.resolve(dataDir);
+  const codeSig = computeParserCodeSig();
   const pricingSig = computePricingSig(rates);
   let pendingSnapshot: Map<string, PersistedScanEntry> | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -133,7 +155,7 @@ export function createPersistentScanCache(
     pendingSnapshot = null;
     pendingExitFlushers.delete(flushSync);
     try {
-      writeAtomicSync(cachePath, serializePayload(resolvedDir, pricingSig, snap));
+      writeAtomicSync(cachePath, serializePayload(resolvedDir, codeSig, pricingSig, snap));
     } catch {
       /* 磁盘不可写时静默降级为纯内存缓存 */
     }
@@ -150,7 +172,7 @@ export function createPersistentScanCache(
         const jsonText = raw[0] === 0x1f && raw[1] === 0x8b ? zlib.gunzipSync(raw).toString("utf8") : raw.toString("utf8");
         const parsed = JSON.parse(jsonText) as Partial<PersistedScanCacheFile>;
         if (
-          parsed.schemaVersion !== SCAN_CACHE_SCHEMA_VERSION ||
+          parsed.codeSig !== codeSig ||
           parsed.pricingSig !== pricingSig ||
           parsed.dataDir !== resolvedDir ||
           !parsed.entries ||
@@ -185,7 +207,7 @@ export function createPersistentScanCache(
         pendingSnapshot = null;
         pendingExitFlushers.delete(flushSync);
         try {
-          const buf = serializePayload(resolvedDir, pricingSig, snap);
+          const buf = serializePayload(resolvedDir, codeSig, pricingSig, snap);
           void writeAtomicAsync(cachePath, buf);
         } catch {
           /* ignore */

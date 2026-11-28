@@ -57,10 +57,9 @@ export const SourceSwitcherBar = memo(function SourceSwitcherBar({
   const allCalls = sources.reduce((sum, s) => sum + s.callCount, 0);
   const isAllActive = !activeSource || activeSource === "all";
   const isTwoAccounts = sources.length === 2;
-  const hasMergedAccount = sources.some((s) => s.mergedKinds && s.mergedKinds.length > 1);
 
   return (
-    <section aria-label="多账号数据源切换" className="space-y-1.5">
+    <section aria-label="多账号数据源切换">
       <div
         className={
           isTwoAccounts
@@ -188,14 +187,6 @@ export const SourceSwitcherBar = memo(function SourceSwitcherBar({
           );
         })}
       </div>
-
-      {isAllActive && (
-        <p className="px-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-          {hasMergedAccount
-            ? "当前为本机多账号合并视图（同账号的 T3 与原生目录已自动归并），点选单个账号可查看独立 5h / 7d 窗口与周校准。"
-            : "当前为本机多账号合并视图，点选上方单个账号可查看其独立 5h / 7d 配额窗口与周校准。"}
-        </p>
-      )}
     </section>
   );
 });
