@@ -22,8 +22,8 @@ export const CUSTOM_PRICING_STORAGE_KEY = "agy_custom_pricing_v1";
 const FALLBACK_PRICE_RATE: ModelPriceRate = {
   modelPattern: "*",
   label: "Default Fallback",
-  inputPerMillion: 2.5,
-  cacheReadPerMillion: 0.25,
+  inputPerMillion: 2.0,
+  cacheReadPerMillion: 0.1,
   outputPerMillion: 10,
 };
 
@@ -508,22 +508,23 @@ export function matchModelPriceRate(
 ): ModelPriceRate {
   // 0. 空表直接返回内置兜底费率
   if (!rates || rates.length === 0) return FALLBACK_PRICE_RATE;
-  const normalized = (modelText || "").toLowerCase(); // 统一转小写便于子串匹配
+  const norm = (s: string) =>
+    (s || "").toLowerCase().replace(/(\d)[-_](\d)/g, "$1.$2").replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = norm(modelText); // 统一归一化便于兼容 opus-5-5 与 Opus 5.5
   let bestMatch: ModelPriceRate | null = null; // 记录最长模式命中的具体规则
+  let bestPatternLen = -1;
   let wildcardMatch: ModelPriceRate | null = null; // 记录通配兜底规则
 
   // 1.1. 遍历单价表区分通配符与具体关键字规则
   for (const rate of rates) {
-    const pattern = (rate.modelPattern || "").trim().toLowerCase();
+    const pattern = norm(rate.modelPattern);
     if (!pattern || pattern === "*" || pattern === "default") {
       wildcardMatch = rate;
       continue;
     }
-    if (
-      normalized.includes(pattern) &&
-      (!bestMatch || pattern.length > bestMatch.modelPattern.trim().length)
-    ) {
+    if (normalized.includes(pattern) && pattern.length > bestPatternLen) {
       bestMatch = rate;
+      bestPatternLen = pattern.length;
     }
   }
   return bestMatch ?? wildcardMatch ?? rates[rates.length - 1] ?? FALLBACK_PRICE_RATE;

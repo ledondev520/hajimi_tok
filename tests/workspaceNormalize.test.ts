@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTelemetryService } from "../server/aggregator";
 import { createMultiSourceTelemetryService } from "../server/multiSource";
 import { parseWorkspaceUris, TEMP_CHAT_WORKSPACE } from "../server/scanner";
+import { groupByMainConversation } from "../src/lib/conversationGroups";
 import { recalculateSummaryWithCustomRates } from "../src/lib/format";
 
 const createdDirs: string[] = [];
@@ -308,5 +309,70 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     expect(all.conversations).toHaveLength(1);
     expect(all.conversations[0].inputTokens).toBe(1500);
     expect(all.conversations[0].sourceLabel).toBe("B");
+  });
+
+  it("links T3 statev2.sqlite fresh_session runs to the same thread, applies official T3 title, and folds them into 1 group", () => {
+    const dataDir = makeTempDir("hajimi-t3-runs-");
+    const t3Dir = makeTempDir("hajimi-t3-state-");
+    const run1 = "aaaa1111-1111-4111-8111-111111111111";
+    const run2 = "bbbb2222-2222-4222-8222-222222222222";
+    const sub1 = "cccc3333-3333-4333-8333-333333333333";
+
+    fs.mkdirSync(path.join(dataDir, "brain"), { recursive: true });
+    const sumDb = new DatabaseSync(path.join(dataDir, "conversation_summaries.db"));
+    createSummaryTable(sumDb);
+    const ins = sumDb.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    ins.run(run1, "72 小时增量灵感盒执行", 2, "2026-11-27T10:00:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "", "", 0);
+    ins.run(run2, "72 小時自動靈感盒執行", 2, "2026-11-28T08:00:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "", "", 0);
+    ins.run(sub1, "", 1, "2026-11-28T08:01:00Z", JSON.stringify(["file:///Users/demo/比稿--轻文化"]), "done", "research", run2, 1);
+    sumDb.close();
+
+    writeJsonlStep(dataDir, run1, "2026-11-27T10:00:00Z", 1000);
+    writeJsonlStep(dataDir, run2, "2026-11-28T08:00:00Z", 2000);
+    writeJsonlStep(dataDir, sub1, "2026-11-28T08:01:00Z", 500);
+
+    const stateDb = new DatabaseSync(path.join(t3Dir, "statev2.sqlite"));
+    stateDb.exec(`
+      CREATE TABLE orchestration_v2_projection_threads (thread_id text primary key, title text);
+      CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id text primary key, thread_id text, payload_json text);
+      CREATE TABLE scheduled_tasks (task_id text primary key, title text, thread_id text);
+    `);
+    const sharedThread = "thread:project:demo:84235c1b-faf6-49b8-9bb2-952dda52db72";
+    stateDb.prepare("INSERT INTO orchestration_v2_projection_threads VALUES (?, ?)").run(
+      sharedThread,
+      "3天每2小时增量灵感盒（72h自动收官）"
+    );
+    stateDb.prepare("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)").run(
+      `provider-thread:provider:antigravity:native-thread:${run1}`,
+      sharedThread,
+      JSON.stringify({ nativeThreadRef: { driver: "antigravity", nativeId: run1 } })
+    );
+    stateDb.prepare("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?, ?, ?)").run(
+      "provider-thread:provider:antigravity:native-thread:pending:2",
+      sharedThread,
+      JSON.stringify({ nativeThreadRef: { driver: "antigravity", nativeId: run2 } })
+    );
+    stateDb.close();
+
+    const svc = createTelemetryService(dataDir, undefined, { isolated: true, t3UserdataDir: t3Dir });
+    const summary = svc.getSummary({ cycle: "all" });
+    expect(summary.conversations).toHaveLength(3);
+
+    const c1 = summary.conversations.find((c) => c.conversationId === run1)!;
+    const c2 = summary.conversations.find((c) => c.conversationId === run2)!;
+    expect(c1.title).toBe("3天每2小时增量灵感盒（72h自动收官）");
+    expect(c1.runTitle).toBe("72 小时增量灵感盒执行");
+    expect(c2.title).toBe("3天每2小时增量灵感盒（72h自动收官）");
+    expect(c2.runTitle).toBe("72 小時自動靈感盒執行");
+    expect(c1.t3ThreadId).toBe(c2.t3ThreadId);
+    expect(c1.t3ThreadId).toMatch(/^t3-[0-9a-f]{12}$/);
+
+    const groups = groupByMainConversation(summary.conversations);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].root.conversationId).toBe(run2);
+    expect(groups[0].siblingRunCount).toBe(2);
+    expect(groups[0].subagentChildCount).toBe(1);
+    expect(groups[0].children).toHaveLength(2);
+    expect(groups[0].rolledInputTokens).toBe(1000 + 2000 + 500);
   });
 });

@@ -288,11 +288,23 @@ describe("AntiGravity Token Engine", () => {
     expect(hydrogenStyle.shortLabel).toBe("Hydrogen");
     expect(new Set([argonStyle.color, carbonStyle.color, neonStyle.color, hydrogenStyle.color]).size).toBe(4);
 
-    // 验证价格匹配计算
-    const opusRate = matchModelRate("Claude Opus 5.5", "claude-opus");
-    const cost = calculateStepCost(1_000_000, 1_000_000, 100_000, opusRate);
-    expect(cost.estimatedCostUsd).toBeCloseTo(15 + 1.5 + 7.5, 4);
-    expect(cost.cacheSavedUsd).toBeCloseTo(13.5, 4);
+    // 验证官方真实 API 单价匹配与成本计算
+    const opus55Rate = matchModelRate("Claude Opus 5.5", "claude-opus-5-5-high");
+    const opus55Cost = calculateStepCost(1_000_000, 1_000_000, 100_000, opus55Rate);
+    expect(opus55Cost.estimatedCostUsd).toBeCloseTo(4 + 0.2 + 2, 4);
+    expect(opus55Cost.cacheSavedUsd).toBeCloseTo(3.8, 4);
+
+    const sonnet55Rate = matchModelRate("Claude Sonnet 5.5 (High)", "claude-sonnet-5-5-high");
+    expect(sonnet55Rate).toMatchObject({ inputPerMillion: 2, cacheReadPerMillion: 0.1, outputPerMillion: 10 });
+
+    const neonRate = matchModelRate("Gemini 4 Neon (XHigh)", "gemini-4-neon");
+    expect(neonRate).toMatchObject({ inputPerMillion: 3, cacheReadPerMillion: 0.15, outputPerMillion: 15 });
+
+    const hydrogenRate = matchModelRate("Gemini 4 Hydrogen (High)", "gemini-4-hydrogen");
+    expect(hydrogenRate).toMatchObject({ inputPerMillion: 1.5, cacheReadPerMillion: 0.075, outputPerMillion: 7.5 });
+
+    const opus5Rate = matchModelRate("Claude Opus 5", "claude-opus-5");
+    expect(opus5Rate).toMatchObject({ inputPerMillion: 5, cacheReadPerMillion: 0.5, outputPerMillion: 25 });
   });
 
   it("slices cross-cycle conversations strictly by per-step 5h and 7d quota windows", () => {

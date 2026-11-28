@@ -72,6 +72,8 @@ export interface ConversationUsageSummary {
   subagentCount: number; // 直接挂载的子代理会话数量
   sourceId?: string; // 多数据源模式下归属源 ID（如 native / t3:antigravity）
   sourceLabel?: string; // 多数据源模式下归属源展示名称
+  t3ThreadId?: string; // 归属的 T3 Code 线程脱敏分组键（供同线程多次 fresh_session 运行折叠合并）
+  runTitle?: string; // 被 T3 正式标题替换前保留的单次运行原始标题（展开同线程历史运行时展示）
   cacheTtl?: CacheTtlSummary; // 基于会话内相邻间隔实测反推的缓存 TTL 摘要
 }
 

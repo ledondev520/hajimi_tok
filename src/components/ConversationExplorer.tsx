@@ -1,11 +1,11 @@
 /**
- * Input: React 状态与记忆化钩子、ConversationUsageSummary 类型、@/lib/format 工具、@/components/ModelCallChart 模型配色解析器与 @/components/ui 基础组件。
- * Output: 导出 ConversationExplorer 紧凑型主会话聚合列表组件（默认将 Subagent 消耗合并并折叠至所属主会话内）。
- * Pos: 主会话级 Token 汇总、子代理折叠展开与单步详情钻取核心表格组件（src/components/ConversationExplorer.tsx）。
+ * Input: React 状态与记忆化钩子、ConversationUsageSummary 类型、@/lib/format 工具、@/lib/conversationGroups 分组器、@/components/ModelCallChart 模型配色解析器与 @/components/ui 基础组件。
+ * Output: 导出 ConversationExplorer 紧凑型主会话聚合列表组件及 groupByMainConversation（默认折叠同 T3 线程多次运行与全部 Subagent）。
+ * Pos: 主会话级 Token 汇总、同线程运行与子代理折叠展开及单步详情钻取核心表格组件（src/components/ConversationExplorer.tsx）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Bot, ChevronDown, ChevronRight, Eye, RotateCcw, Search, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, ChevronDown, ChevronRight, Eye, History, RotateCcw, Search, X } from "lucide-react";
 import type { ConversationUsageSummary } from "@/types/telemetry";
 import {
   formatDateTime,
@@ -18,6 +18,7 @@ import {
   resolveContextHealth,
   writeStoredJson,
 } from "@/lib/format";
+import { groupByMainConversation, type MainConversationGroup } from "@/lib/conversationGroups";
 import { formatCompactGap, resolveLiveCacheWarmth } from "@/lib/cacheTtl";
 import { resolveModelStyle } from "@/components/ModelCallChart";
 import { Badge } from "@/components/ui/badge";
@@ -39,27 +40,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
+export { groupByMainConversation, type MainConversationGroup };
+
 /** 精简表格主模型列显示名称（剥离冗长的 Gemini 4 前缀，窄屏一眼分辨具体子型号） */
 const compactModelName = (name: string): string =>
   (name || "Unknown").replace(/^Gemini\s+4\s+/i, "").trim() || "Unknown";
 
 /** 会话列表表头点击排序维度枚举 */
 type SortByKey = "recent" | "tokens" | "cost" | "calls" | "cacheRate";
-
-/** 合并了全部下属 Subagent 消耗后的顶层主会话聚合节点 */
-export interface MainConversationGroup {
-  root: ConversationUsageSummary; // 主会话自身原始记录
-  children: ConversationUsageSummary[]; // 挂载在该主会话下的全部子代理（按时间倒序）
-  rolledCallCount: number; // 主会话 + 子代理总调用轮数
-  rolledInputTokens: number; // 合并未缓存新增输入 Token
-  rolledCacheReadTokens: number; // 合并缓存读取 Token
-  rolledOutputTokens: number; // 合并输出 Token
-  rolledTotalTokens: number; // 合并总消耗 Token
-  rolledCacheHitRate: number; // 合并缓存命中率
-  rolledCostUsd: number; // 合并等效 API 成本
-  rolledLastModifiedAt: string; // 主会话与子代理中的最新活跃时间
-  allModels: string[]; // 主会话及子代理涉及的全部模型
-}
 
 /** ConversationExplorer 组件入参属性 */
 export interface ConversationExplorerProps {
@@ -70,103 +58,6 @@ export interface ConversationExplorerProps {
   selectedModel: string; // 当前选中的模型过滤值
   onModelChange: (model: string) => void; // 模型筛选变更回调
   onInspectConversation: (conv: ConversationUsageSummary) => void; // 打开单会话步骤明细回调
-}
-
-/**
- * 职责：将子代理（Subagent）递归归并到所属顶层主会话，生成主会话聚合列表。
- * 思路：1) 建立 ID 索引向上追溯根会话 ID；2) 将子代理挂载至根会话 children 并累加各项 Token 与成本；3) 无父节点在库中的孤儿记录兜底保留为独立行防止漏算。
- * 参数：conversations — 原始扁平会话列表。
- * 返回值：聚合后的主会话分组数组。
- */
-export function groupByMainConversation(
-  conversations: ConversationUsageSummary[]
-): MainConversationGroup[] {
-  // 0. 构建会话字典用于向上追溯顶层父会话
-  const byId = new Map<string, ConversationUsageSummary>();
-  for (const c of conversations) {
-    byId.set(c.conversationId, c);
-  }
-
-  // 1.1. 向上查找每个会话的顶层主会话 ID（带环路保护）
-  const resolveRootId = (conv: ConversationUsageSummary): string => {
-    let cur = conv;
-    const seen = new Set<string>([cur.conversationId]);
-    while (cur.parentConversationId && byId.has(cur.parentConversationId)) {
-      if (seen.has(cur.parentConversationId)) break;
-      seen.add(cur.parentConversationId);
-      cur = byId.get(cur.parentConversationId)!;
-    }
-    return cur.conversationId;
-  };
-
-  // 1.2. 按 rootId 聚合主会话与全部后代 Subagent
-  const bucketMap = new Map<
-    string,
-    { root: ConversationUsageSummary; children: ConversationUsageSummary[] }
-  >();
-
-  for (const c of conversations) {
-    const rootId = resolveRootId(c);
-    const rootConv = byId.get(rootId) ?? c;
-    let bucket = bucketMap.get(rootId);
-    if (!bucket) {
-      bucket = { root: rootConv, children: [] };
-      bucketMap.set(rootId, bucket);
-    }
-    if (c.conversationId !== rootId) {
-      bucket.children.push(c);
-    }
-  }
-
-  // 2. 计算合并后的总 Token、调用轮数、缓存率与等效成本
-  const groups: MainConversationGroup[] = [];
-  for (const { root, children } of bucketMap.values()) {
-    children.sort(
-      (a, b) =>
-        new Date(b.lastModifiedAt).getTime() - new Date(a.lastModifiedAt).getTime()
-    );
-    const members = [root, ...children];
-    let rolledCallCount = 0;
-    let rolledInputTokens = 0;
-    let rolledCacheReadTokens = 0;
-    let rolledOutputTokens = 0;
-    let rolledTotalTokens = 0;
-    let rolledCostUsd = 0;
-    let rolledLastModifiedAt = root.lastModifiedAt;
-    const modelSet = new Set<string>(root.models);
-    if (root.primaryModel) modelSet.add(root.primaryModel);
-
-    for (const m of members) {
-      rolledCallCount += m.callCount;
-      rolledInputTokens += m.inputTokens;
-      rolledCacheReadTokens += m.cacheReadTokens;
-      rolledOutputTokens += m.outputTokens;
-      rolledTotalTokens += m.totalTokens;
-      rolledCostUsd += m.estimatedCostUsd;
-      if (m.lastModifiedAt > rolledLastModifiedAt) {
-        rolledLastModifiedAt = m.lastModifiedAt;
-      }
-      for (const mod of m.models) if (mod) modelSet.add(mod);
-      if (m.primaryModel) modelSet.add(m.primaryModel);
-    }
-
-    const promptSum = rolledInputTokens + rolledCacheReadTokens;
-    groups.push({
-      root,
-      children,
-      rolledCallCount,
-      rolledInputTokens,
-      rolledCacheReadTokens,
-      rolledOutputTokens,
-      rolledTotalTokens,
-      rolledCacheHitRate: promptSum > 0 ? rolledCacheReadTokens / promptSum : 0,
-      rolledCostUsd,
-      rolledLastModifiedAt,
-      allModels: [...modelSet],
-    });
-  }
-
-  return groups;
 }
 
 /**
@@ -261,6 +152,7 @@ export const ConversationExplorer = memo(function ConversationExplorer({
       const inChild = g.children.some(
         (ch) =>
           ch.title.toLowerCase().includes(q) ||
+          (ch.runTitle || "").toLowerCase().includes(q) ||
           ch.agentName.toLowerCase().includes(q) ||
           ch.conversationId.toLowerCase().includes(q)
       );
@@ -499,7 +391,7 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                               type="button"
                               onClick={() => toggleExpand(root.conversationId)}
                               aria-expanded={isExpanded}
-                              aria-label={isExpanded ? "收起子代理明细" : "展开子代理明细"}
+                              aria-label={isExpanded ? "收起明细" : "展开明细"}
                               className="inline-flex shrink-0 items-center gap-0.5 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 transition-colors hover:bg-violet-500/20 dark:bg-violet-500/15 dark:text-violet-300"
                             >
                               {isExpanded ? (
@@ -507,7 +399,11 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                               ) : (
                                 <ChevronRight className="size-3" />
                               )}
-                              含 {children.length} 子代理
+                              {group.siblingRunCount > 1 && group.subagentChildCount > 0
+                                ? `含 ${group.siblingRunCount} 次运行 · ${group.subagentChildCount} 子代理`
+                                : group.siblingRunCount > 1
+                                  ? `含 ${group.siblingRunCount} 次运行`
+                                  : `含 ${children.length} 子代理`}
                             </button>
                           )}
                           {ctxHealth && ctxHealth.level !== "ok" && (
@@ -710,7 +606,9 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                             </Button>
                           </TableCell>
                           <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
-                            ├─ 主会话自身消耗
+                            {group.siblingRunCount > 1
+                              ? `├─ 最近运行${root.runTitle ? ` · ${root.runTitle}` : ""}`
+                              : "├─ 主会话自身消耗"}
                           </TableCell>
                           <TableCell className="py-1 text-slate-400">-</TableCell>
                           <TableCell
@@ -739,8 +637,10 @@ export const ConversationExplorer = memo(function ConversationExplorer({
 
                         {children.map((sub, idx) => {
                           const branchChar = idx === children.length - 1 ? "└─" : "├─";
-                          const subLabel =
-                            sub.agentName || `子代理 ${sub.conversationId.slice(0, 6)}`;
+                          const isSubagent = Boolean(sub.parentConversationId);
+                          const subLabel = isSubagent
+                            ? sub.agentName || `子代理 ${sub.conversationId.slice(0, 6)}`
+                            : sub.runTitle || `历史运行 ${formatDateTime(sub.lastModifiedAt).slice(5, 16)}`;
                           return (
                             <TableRow
                               key={sub.conversationId}
@@ -754,7 +654,11 @@ export const ConversationExplorer = memo(function ConversationExplorer({
                                 <TableCell className="max-w-44 truncate py-1 pl-5 text-slate-600 lg:max-w-64 dark:text-slate-300">
                                   <span className="inline-flex min-w-0 items-center gap-1">
                                     <span className="shrink-0 text-slate-400">{branchChar}</span>
-                                    <Bot className="size-3 shrink-0 text-violet-500" />
+                                    {isSubagent ? (
+                                      <Bot className="size-3 shrink-0 text-violet-500" />
+                                    ) : (
+                                      <History className="size-3 shrink-0 text-sky-500" />
+                                    )}
                                     <span className="truncate">{subLabel}</span>
                                     <span className="shrink-0 font-mono text-[10px] text-slate-400">({sub.conversationId.slice(0, 6)})</span>
                                   </span>

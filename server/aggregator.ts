@@ -198,6 +198,7 @@ export interface TelemetryServiceOptions {
   liveQuotaPath?: string; // 可选自定义 live-quota.json 路径
   expectedAccountEmail?: string; // 可选预期账号邮箱（防 live-quota.json 串号）
   useEnvAnchors?: boolean; // 是否读取环境变量锚点（默认非隔离态启用）
+  t3UserdataDir?: string | null; // 可选 T3 userdata 目录（null 表示禁用 statev2 线程归并）
   scanner?: ReturnType<typeof createTelemetryScanner>; // 可选外部注入扫描器（供多源聚合复用缓存避免重复扫盘）
 }
 
@@ -225,7 +226,8 @@ export function createTelemetryService(
   const isolated = Boolean(serviceOpts.isolated);
   const useEnvAnchors = serviceOpts.useEnvAnchors ?? !isolated;
   const pricing = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效费率配置
-  const scanner = serviceOpts.scanner ?? createTelemetryScanner(customDataDir, pricing); // 增量扫描器实例
+  const t3Dir = serviceOpts.t3UserdataDir !== undefined ? serviceOpts.t3UserdataDir : isolated ? null : undefined;
+  const scanner = serviceOpts.scanner ?? createTelemetryScanner(customDataDir, pricing, t3Dir); // 增量扫描器实例
   const resetStore =
     !isolated || serviceOpts.resetsPath || serviceOpts.sharedResetsPath
       ? createResetStore(serviceOpts.resetsPath, serviceOpts.sharedResetsPath)

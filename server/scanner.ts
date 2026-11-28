@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ConversationDetail, DataSourceHealth, ModelPriceRate, StepUsageRecord } from "../src/types/telemetry";
 import { calculateStepCost, DEFAULT_MODEL_PRICING, matchModelRate } from "./pricing";
 import { decodeGenMetadata, type ParsedGenMetadata } from "./protobuf";
+import { createT3ThreadIndex } from "./t3Threads";
 import {
   filterEmptyConversations,
   normalizeConversationWorkspaces,
@@ -253,8 +254,12 @@ function parseTranscriptJsonl(jsonlPath: string, fallbackIso: string) {
         const sm = content.match(/changed setting `Model Selection` from .*? to ([^\n<>]+?)(?:\.\s|\.$|<|\n|$)/);
         if (sm) activeModelFromSettings = sm[1].trim().replace(/\.+$/, "").trim();
         if (!firstPromptPreview && content) {
-          const req = content.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
-          const text = (req ? req[1] : content).replace(/\s+/g, " ").trim();
+          const innerReq = content.match(/<user_request>([\s\S]*?)<\/user_request>/);
+          const outerReq = !innerReq ? content.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i) : null;
+          const cleaned = (innerReq ? innerReq[1] : outerReq ? outerReq[1] : content)
+            .replace(/<t3_code_instructions>[\s\S]*?<\/t3_code_instructions>/gi, "")
+            .replace(/<runtime_info>[\s\S]*?<\/runtime_info>/gi, "");
+          const text = cleaned.replace(/\s+/g, " ").trim();
           if (text) firstPromptPreview = text.slice(0, 140);
         }
       } else if (obj.type === "PLANNER_RESPONSE") {
@@ -377,9 +382,14 @@ function mergeHybridSteps(dbMetas: ParsedGenMetadata[], jsonlSteps: JsonlStepIte
  * 参数：customDataDir — 可选数据目录；customRates — 可选单价配置。
  * 返回值：暴露 scan(forceRefresh) 的扫描器实例。
  */
-export function createTelemetryScanner(customDataDir?: string, customRates?: ModelPriceRate[]) {
+export function createTelemetryScanner(
+  customDataDir?: string,
+  customRates?: ModelPriceRate[],
+  t3UserdataDir?: string | null,
+) {
   const dataDir = customDataDir || resolveDefaultDataDir(); // 实际扫描根目录
   const rates = customRates && customRates.length > 0 ? customRates : DEFAULT_MODEL_PRICING; // 生效单价表
+  const t3ThreadIndex = createT3ThreadIndex(openSqliteSafe, t3UserdataDir); // T3 线程与正式标题只读索引器
   const cache = new Map<string, CachedConversationEntry>(); // 会话级增量缓存
   const SCAN_TTL_MS = 2500; // 短时扫描结果复用窗口（毫秒），避免切换模型池时重复 stat/SQLite 阻塞
   let scanVersion = 0; // 数据实际变更版本号，供聚合层安全命中结果缓存
@@ -472,12 +482,15 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
       }
 
       // 3. 逐会话增量扫描（单会话读取异常隔离且不缓存失败快照，恢复后下次自动重试）
+      const t3ThreadMap = t3ThreadIndex.load(forceRefresh);
       const conversations: ConversationDetail[] = [];
       let hadAnyReadError = false;
       for (const id of allIds) {
         const dbPath = path.join(convDir, `${id}.db`), jsonlPath = path.join(brainDir, id, ".system_generated", "logs", "transcript.jsonl");
         const pbtxtPath = path.join(dataDir, "annotations", `${id}.pbtxt`), sRow = summaryMap.get(id);
-        const fp = `${getFileSig(dbPath)}#${getFileSig(`${dbPath}-wal`)}#${getFileSig(jsonlPath)}#${getFileSig(pbtxtPath)}#${sRow ? `${sRow.title ?? ""}|${sRow.step_count ?? 0}|${sRow.last_modified_time ?? ""}|${sRow.workspace_uris ?? ""}|${sRow.status ?? ""}|${sRow.parent_conversation_id ?? ""}` : ""}`;
+        const t3Link = t3ThreadMap.get(id.toLowerCase());
+        const t3Sig = t3Link ? `${t3Link.t3ThreadId}|${t3Link.t3ThreadTitle}` : "";
+        const fp = `${getFileSig(dbPath)}#${getFileSig(`${dbPath}-wal`)}#${getFileSig(jsonlPath)}#${getFileSig(pbtxtPath)}#${t3Sig}#${sRow ? `${sRow.title ?? ""}|${sRow.step_count ?? 0}|${sRow.last_modified_time ?? ""}|${sRow.workspace_uris ?? ""}|${sRow.status ?? ""}|${sRow.parent_conversation_id ?? ""}` : ""}`;
         const hit = cache.get(id);
         if (!forceRefresh && hit && hit.fingerprint === fp) { trackMode(hit.readMode); conversations.push(hit.detail); continue; }
         changed = true;
@@ -526,8 +539,15 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
         const lastStep = steps[steps.length - 1];
         const latestContextUsed = lastStep ? (lastStep.contextUsed > 0 ? lastStep.contextUsed : lastStep.inputTokens + lastStep.cacheReadTokens) : 0;
         const lastModifiedAt = jsonl.latestAt && jsonl.latestAt > fallbackIso ? jsonl.latestAt : fallbackIso;
+        const rawTitle = sRow?.title?.trim() || pbtxt.title || jsonl.firstPromptPreview || `会话 ${id.slice(0, 8)}`;
+        const isRootConv = !(sRow?.parent_conversation_id ?? "");
+        const resolvedTitle = isRootConv && t3Link?.t3ThreadTitle ? t3Link.t3ThreadTitle : rawTitle;
+        const runTitle =
+          isRootConv && t3Link?.t3ThreadTitle && rawTitle !== t3Link.t3ThreadTitle && !rawTitle.startsWith("会话 ")
+            ? rawTitle
+            : undefined;
         const detail: ConversationDetail = {
-          conversationId: id, title: sRow?.title?.trim() || pbtxt.title || jsonl.firstPromptPreview || `会话 ${id.slice(0, 8)}`,
+          conversationId: id, title: resolvedTitle,
           firstPromptPreview: jsonl.firstPromptPreview, workspaceUri: ws.workspaceUri, workspaceName: ws.workspaceName, workspacePath: ws.workspacePath,
           parentConversationId: sRow?.parent_conversation_id ?? "", nestingDepth: Number(sRow?.nesting_depth ?? 0),
           agentName: sRow?.agent_name ?? "", archived: pbtxt.archived, status: sRow?.status || "unknown",
@@ -537,6 +557,8 @@ export function createTelemetryScanner(customDataDir?: string, customRates?: Mod
           inputTokens, cacheReadTokens, outputTokens, thinkingTokens, responseTokens, totalTokens,
           cacheHitRate: promptSum > 0 ? cacheReadTokens / promptSum : 0, peakContextUsed, latestContextUsed, contextLimit,
           totalLatencyMs, estimatedCostUsd, cacheSavedUsd, subagentCount: 0, steps, toolUsageCounts,
+          ...(isRootConv && t3Link?.t3ThreadId ? { t3ThreadId: t3Link.t3ThreadId } : {}),
+          ...(runTitle ? { runTitle } : {}),
         };
         if (hadConvReadError) {
           hadAnyReadError = true;

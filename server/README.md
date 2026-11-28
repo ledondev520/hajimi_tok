@@ -1,9 +1,10 @@
 若本文件夹结构或内容变化，请更新本文件。
 
 - `protobuf.ts`｜`gen_metadata` Protobuf 零依赖解码
-- `pricing.ts`｜模型单价预设与成本计算
+- `pricing.ts`｜Google / Anthropic 官方标准 API 模型单价预设与成本计算
 - `workspaceNormalize.ts`｜git/T3/Swarm 工作树项目归并、未绑定与临时目录合为「临时对话」及无调用空壳会话过滤
-- `scanner.ts`｜SQLite + `transcript.jsonl` 只读增量扫描（含 `conversation_summaries.db` 与 `-wal` 指纹复用、委托工作区归并与空壳过滤）
+- `t3Threads.ts`｜`~/.t3/userdata/statev2.sqlite` 零写入只读索引，关联同 T3 线程多次 `fresh_session` 运行并还原正式标题
+- `scanner.ts`｜SQLite + `transcript.jsonl` 只读增量扫描（含 `conversation_summaries.db` 与 `-wal` 指纹复用、工作区归并、T3 线程关联与空壳过滤）
 - `sources.ts`｜本机原生 Antigravity（含 `antigravity-cli`）与 T3 Code 多账号自动发现、同 Google 账号无侵入归并与 `live-quota.json` 精准绑定
 - `quotaCycle.ts`｜按配额池切分 5h / 7d 周期与倒计时
 - `resetStore.ts`｜合并仓库 `shared-resets.json` 与本机重置/校准/实时配额读写（支持只读公共视图）

@@ -28,7 +28,8 @@ import {
 } from "./sources";
 
 /** 多数据源服务可选配置 */
-export interface MultiSourceServiceOptions extends TelemetryServiceOptions, DiscoverSourcesOptions {
+export interface MultiSourceServiceOptions
+  extends TelemetryServiceOptions, Omit<DiscoverSourcesOptions, "t3UserdataDir"> {
   sources?: DiscoveredDataSource[]; // 可选显式数据源列表（供单测注入）
 }
 
@@ -48,15 +49,16 @@ interface SourceEntry {
  */
 function createAccountDirScanner(
   dirs: string[],
-  pricing: ModelPriceRate[]
+  pricing: ModelPriceRate[],
+  t3UserdataDir?: string | null
 ): TelemetryScannerInstance {
   const uniqueDirs = [...new Set(dirs.filter(Boolean))];
   if (uniqueDirs.length <= 1) {
-    return createTelemetryScanner(uniqueDirs[0], pricing);
+    return createTelemetryScanner(uniqueDirs[0], pricing, t3UserdataDir);
   }
   const subScanners = uniqueDirs.map((dir) => ({
     dir,
-    scanner: createTelemetryScanner(dir, pricing),
+    scanner: createTelemetryScanner(dir, pricing, t3UserdataDir),
   }));
   let compositeSig = "";
   let combinedVersion = 0;
@@ -365,17 +367,21 @@ export function createMultiSourceTelemetryService(
       : discoverLocalDataSources({
           customDataDir,
           homeDir: options.homeDir,
-          t3UserdataDir: options.t3UserdataDir,
+          t3UserdataDir: options.t3UserdataDir || undefined,
           stateRootDir: options.stateRootDir,
         });
+
+  const t3DirForScanner =
+    options.t3UserdataDir !== undefined ? options.t3UserdataDir : options.isolated ? null : undefined;
 
   // 0. 单账号退化路径：与历史单源行为完全一致；若单账号自动归并了多个本地目录（如原生 App + CLI）则注入组合扫描器
   if (discovered.length <= 1) {
     const only = discovered[0];
     const singleOpts: TelemetryServiceOptions = {
       ...options,
+      t3UserdataDir: t3DirForScanner,
       ...(only?.extraDataDirs && only.extraDataDirs.length > 0
-        ? { scanner: createAccountDirScanner([only.dataDir, ...only.extraDataDirs], pricing) }
+        ? { scanner: createAccountDirScanner([only.dataDir, ...only.extraDataDirs], pricing, t3DirForScanner) }
         : {}),
       ...(only?.liveQuotaPath && !options.liveQuotaPath ? { liveQuotaPath: only.liveQuotaPath } : {}),
     };
@@ -388,7 +394,7 @@ export function createMultiSourceTelemetryService(
     options.sharedResetsPath ?? (!isolatedState ? (resolveSharedResetsPath() ?? undefined) : undefined);
   const entries: SourceEntry[] = discovered.map((meta) => {
     const dirs = [meta.dataDir, ...(meta.extraDataDirs ?? [])];
-    const rawScanner = createAccountDirScanner(dirs, pricing);
+    const rawScanner = createAccountDirScanner(dirs, pricing, t3DirForScanner);
     const taggedScanner = createTaggedScanner(rawScanner, meta);
     const resolvedLiveQuotaPath =
       meta.liveQuotaPath ??
