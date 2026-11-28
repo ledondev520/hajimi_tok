@@ -32,7 +32,9 @@ export interface DiscoverSourcesOptions {
   stateRootDir?: string; // 覆盖 ~/.hamiji-sta
 }
 
-const LOG_HEAD_READ_BYTES = 32 * 1024; // 仅读启动日志前 32KB 提取非敏感 applyAuthResult 邮箱
+const LOG_FAST_READ_BYTES = 16 * 1024; // 实测 applyAuthResult 位于前 10KB，优先读 16KB 减少一半 I/O，未命中再补读至 32KB
+const LOG_HEAD_READ_BYTES = 32 * 1024;
+const ISOLATED_UNANIMOUS_EARLY_STOP = 10; // 最新连续 10 份隔离日志指向同一邮箱时提前结束抽样
 const AUTH_EMAIL_RE = /applyAuthResult:\s*email=([^\s,]+@[^\s,]+)/i;
 const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -53,16 +55,24 @@ function normalizeEmail(raw: unknown): string | undefined {
   return SIMPLE_EMAIL_RE.test(cleaned) ? cleaned : undefined;
 }
 
-/** 仅读取单个普通 .log 文件前 32KB 并提取启动认证邮箱与是否启用文件隔离存储（绝不碰任何凭证/token 文件） */
+/** 仅读取单个普通 .log 文件头部（优先 16KB，未命中补读至 32KB）并提取启动认证邮箱与文件隔离标记（绝不碰凭证文件） */
 function readLogAuthHint(filePath: string): { email: string; isolatedFileStorage: boolean } | undefined {
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, "r");
-    const buf = Buffer.alloc(LOG_HEAD_READ_BYTES);
-    const bytesRead = fs.readSync(fd, buf, 0, LOG_HEAD_READ_BYTES, 0);
-    if (bytesRead <= 0) return undefined;
-    const text = buf.subarray(0, bytesRead).toString("utf8");
-    const m = text.match(AUTH_EMAIL_RE);
+    const buf = Buffer.allocUnsafe(LOG_HEAD_READ_BYTES);
+    let totalRead = fs.readSync(fd, buf, 0, LOG_FAST_READ_BYTES, 0);
+    if (totalRead <= 0) return undefined;
+    let text = buf.subarray(0, totalRead).toString("utf8");
+    let m = text.match(AUTH_EMAIL_RE);
+    if (!m && totalRead === LOG_FAST_READ_BYTES) {
+      const more = fs.readSync(fd, buf, totalRead, LOG_HEAD_READ_BYTES - totalRead, totalRead);
+      if (more > 0) {
+        totalRead += more;
+        text = buf.subarray(0, totalRead).toString("utf8");
+        m = text.match(AUTH_EMAIL_RE);
+      }
+    }
     const email = m ? normalizeEmail(m[1]) : undefined;
     if (!email) return undefined;
     return { email, isolatedFileStorage: text.includes("Using file-based token storage") };
@@ -127,7 +137,12 @@ export function detectAccountEmailFromLogs(dirs: string[]): string | undefined {
           else map.set(hit.email, { count: 1, firstIndex: i });
         };
         addVote(allCounts);
-        if (hit.isolatedFileStorage) addVote(isolatedCounts);
+        if (hit.isolatedFileStorage) {
+          addVote(isolatedCounts);
+          if (isolatedCounts.size === 1 && isolatedCounts.get(hit.email)!.count >= ISOLATED_UNANIMOUS_EARLY_STOP) {
+            break;
+          }
+        }
       }
       const winner = pickMajorityEmail(isolatedCounts) ?? pickMajorityEmail(allCounts);
       if (winner) return winner;

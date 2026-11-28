@@ -23,6 +23,7 @@ import type {
 import { DEFAULT_MODEL_PRICING } from "./pricing";
 import {
   computeQuotaCycleWindow,
+  getStepsTimestampMs,
   matchesModelQuery,
   resolveQuotaCycleBlocks,
 } from "./quotaCycle";
@@ -100,12 +101,13 @@ function projectConversationSteps(
   stepTimeFilter: ((modelName: string, modelId: string, tsMs: number) => boolean) | null,
   keepAsZeroShell = false
 ): ConversationDetail | null {
-  // 0. 按模型池与单步配额池周期边界双重过滤推理步骤
-  const matchedSteps = conv.steps.filter((s) => {
+  // 0. 按模型池与单步配额池周期边界双重过滤推理步骤（复用预解析时间戳索引）
+  const stepTsList = stepTimeFilter ? getStepsTimestampMs(conv.steps) : null;
+  const matchedSteps = conv.steps.filter((s, idx) => {
     if (!matchesModelQuery(s.modelName, s.modelId, modelQuery)) return false;
     if (stepTimeFilter) {
-      const ts = Date.parse(s.timestamp);
-      if (Number.isNaN(ts) || !stepTimeFilter(s.modelName, s.modelId, ts)) return false;
+      const ts = stepTsList![idx];
+      if (ts <= 0 || !stepTimeFilter(s.modelName, s.modelId, ts)) return false;
     }
     return true;
   });
@@ -363,15 +365,7 @@ export function createTelemetryService(
       const hourMap = new Map<string, UsageTimeBucket>();
       const modelAgg = new Map<
         string,
-        ModelUsageBreakdown & {
-          convIds: Set<string>;
-          latencySum: number;
-          timedCalls: number;
-          timedOut: number;
-          timedLatMs: number;
-          streamOut: number;
-          streamMs: number;
-        }
+        ModelUsageBreakdown & { convIds: Set<string>; latencySum: number; timedCalls: number; timedOut: number; timedLatMs: number; streamOut: number; streamMs: number }
       >();
       const wsAgg = new Map<string, WorkspaceUsageBreakdown>();
       const wsTtlObsMap = new Map<string, CacheTtlObservation[]>();
@@ -440,10 +434,11 @@ export function createTelemetryService(
 
         const rootConv = resolveRootConv(conv);
 
-        // 2.2. 逐推理步累加模型、时间桶、今日指标与工具关联
-        for (const s of conv.steps) {
-          const parsedTs = Date.parse(s.timestamp);
-          const safeTsMs = Number.isNaN(parsedTs) ? 0 : parsedTs;
+        // 2.2. 逐推理步累加模型、时间桶、今日指标与工具关联（复用预解析毫秒时间戳）
+        const convTsList = getStepsTimestampMs(conv.steps);
+        for (let stepIdx = 0; stepIdx < conv.steps.length; stepIdx++) {
+          const s = conv.steps[stepIdx];
+          const safeTsMs = convTsList[stepIdx];
           rawStepEntries.push({
             conv,
             rootConv,
@@ -672,10 +667,12 @@ export function createTelemetryService(
         let poolCostUsdAtSample = 0;
         let poolTokensAtSample = 0;
         for (const c of allDetails) {
-          for (const st of c.steps) {
+          const tsList = getStepsTimestampMs(c.steps);
+          for (let i = 0; i < c.steps.length; i++) {
+            const st = c.steps[i];
+            const stMs = tsList[i];
+            if (stMs < winStartMs || stMs > liveMs) continue;
             if (!matchesModelQuery(st.modelName, st.modelId, poolKey)) continue;
-            const stMs = Date.parse(st.timestamp);
-            if (!Number.isFinite(stMs) || stMs < winStartMs || stMs > liveMs) continue;
             poolCostUsdAtSample += st.estimatedCostUsd;
             poolTokensAtSample += st.totalTokens;
           }

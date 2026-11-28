@@ -268,12 +268,19 @@ describe("HTTP Telemetry Server (server/app.ts)", () => {
     });
   });
 
-  it("handles GET /api/conversations/:id with URL-decoded IDs and 404 on unknown ID", async () => {
+  it("handles GET /api/conversations/:id with URL-decoded IDs, ETag 304, and 404 on unknown ID", async () => {
     const { baseUrl } = await startServer(createMockProviderFixture().provider);
 
     const okRes = await fetch(`${baseUrl}/api/conversations/${encodeURIComponent("conv:sub-002")}`);
     expect(okRes.status).toBe(200);
+    const etag = okRes.headers.get("etag");
+    expect(etag).toBeTruthy();
     expect(((await okRes.json()) as ConversationDetail).conversationId).toBe("conv:sub-002");
+
+    const notModifiedRes = await fetch(`${baseUrl}/api/conversations/${encodeURIComponent("conv:sub-002")}`, {
+      headers: { "If-None-Match": etag! },
+    });
+    expect(notModifiedRes.status).toBe(304);
 
     const missingRes = await fetch(`${baseUrl}/api/conversations/non-existent-id`);
     expect(missingRes.status).toBe(404);

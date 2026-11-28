@@ -450,4 +450,33 @@ describe("scanner workspace normalization, empty-shell filtering, and cross-sour
     expect(todayTotalCalls).toBe(5);
     expect(todayByModel.reduce((acc, m) => acc + m.totalTokens, 0)).toBe(5 * 5200);
   });
+
+  it("fast-scans large GENERIC JSONL lines without full JSON.parse while preserving stepCount and timestamps", () => {
+    const dataDir = makeTempDir("hajimi-jsonl-fast-");
+    const convId = "ffff6666-6666-4666-8666-666666666666";
+    const logDir = path.join(dataDir, "brain", convId, ".system_generated", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const hugeToolOutput = "x".repeat(4096);
+    const jsonlFile = path.join(logDir, "transcript.jsonl");
+    fs.writeFileSync(
+      jsonlFile,
+      [
+        JSON.stringify({ step_index: 1, type: "USER_INPUT", created_at: "2026-11-28T01:00:00Z", content: "hello fast scan" }),
+        JSON.stringify({ step_index: 2, type: "PLANNER_RESPONSE", created_at: "2026-11-28T01:01:00Z", input_tokens: 1200, cache_read_tokens: 800, output_tokens: 100 }),
+        JSON.stringify({ step_index: 9, type: "GENERIC", created_at: "2026-11-28T01:05:00Z", content: hugeToolOutput }),
+      ].join("\n"),
+      "utf8"
+    );
+    const oldTime = new Date("2026-11-28T00:00:00Z");
+    fs.utimesSync(jsonlFile, oldTime, oldTime);
+
+    const svc = createTelemetryService(dataDir, undefined, { isolated: true });
+    const summary = svc.getSummary({ cycle: "all" });
+    expect(summary.conversations).toHaveLength(1);
+    const conv = summary.conversations[0];
+    expect(conv.callCount).toBe(1);
+    expect(conv.stepCount).toBe(10);
+    expect(conv.lastModifiedAt).toBe("2026-11-28T01:05:00.000Z");
+    expect(conv.firstPromptPreview).toBe("hello fast scan");
+  });
 });

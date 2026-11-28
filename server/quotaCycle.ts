@@ -1,6 +1,6 @@
 /**
- * Input: ../src/types/telemetry 中的 ConversationDetail、QuotaCycleInfo 与 QuotaCycleMode 类型契约。
- * Output: 导出 matchesModelQuery、resolveQuotaCycleBlocks 与 computeQuotaCycleWindow 分池配额周期推算模块。
+ * Input: ../src/types/telemetry 中的 ConversationDetail、StepUsageRecord、QuotaCycleInfo 与 QuotaCycleMode 类型契约。
+ * Output: 导出 getStepsTimestampMs、matchesModelQuery、resolveQuotaCycleBlocks 与 computeQuotaCycleWindow（带 WeakMap 预排序分池索引）分池配额周期推算模块。
  * Pos: 服务端配额池归类与 5h / 7d 双层配额周期时间窗计算核心模块（server/quotaCycle.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -10,10 +10,85 @@ import type {
   QuotaCycleMode,
   QuotaCycleOption,
   QuotaResetEvent,
+  StepUsageRecord,
 } from "../src/types/telemetry";
 
 const FIVE_HOURS_MS = 5 * 3_600_000; // 官方短窗口：首条调用起 5 小时刷新周期（毫秒）
 const SEVEN_DAYS_MS = 7 * 86_400_000; // 官方长窗口：首条调用锚定 7 天周上限周期（毫秒）
+
+const STEP_TS_CACHE = new WeakMap<StepUsageRecord[], number[]>(); // 按会话步骤数组引用缓存已解析毫秒时间戳，消除重复 Date.parse
+
+interface PoolStepEntry {
+  tsMs: number;
+  totalTokens: number;
+}
+
+interface QuotaDetailsIndex {
+  convCount: number;
+  stepTotal: number;
+  claudeEntries: PoolStepEntry[];
+  geminiEntries: PoolStepEntry[];
+  otherEntries: PoolStepEntry[];
+  allEntries: PoolStepEntry[];
+}
+
+const QUOTA_DETAILS_INDEX = new WeakMap<ConversationDetail[], QuotaDetailsIndex>(); // 按扫描快照数组引用缓存分池升序时间线索引
+
+/** 获取单会话各步骤的毫秒时间戳数组（按 steps 数组引用 WeakMap 缓存，未命中或长度变化时一次解析） */
+export function getStepsTimestampMs(steps: StepUsageRecord[]): number[] {
+  const hit = STEP_TS_CACHE.get(steps);
+  if (hit && hit.length === steps.length) return hit;
+  const parsed = new Array<number>(steps.length);
+  for (let i = 0; i < steps.length; i++) {
+    const ms = Date.parse(steps[i].timestamp);
+    parsed[i] = Number.isNaN(ms) ? 0 : ms;
+  }
+  STEP_TS_CACHE.set(steps, parsed);
+  return parsed;
+}
+
+/** 构建或复用全量会话的分池升序时间线索引，避免单次汇总多次调用 computeQuotaCycleWindow 重复遍历排序 */
+function getOrBuildQuotaIndex(allDetails: ConversationDetail[]): QuotaDetailsIndex {
+  let stepTotal = 0;
+  for (const c of allDetails) stepTotal += c.steps.length;
+  const hit = QUOTA_DETAILS_INDEX.get(allDetails);
+  if (hit && hit.convCount === allDetails.length && hit.stepTotal === stepTotal) {
+    return hit;
+  }
+  const claudeEntries: PoolStepEntry[] = [];
+  const geminiEntries: PoolStepEntry[] = [];
+  const otherEntries: PoolStepEntry[] = [];
+  for (const conv of allDetails) {
+    const tsList = getStepsTimestampMs(conv.steps);
+    for (let i = 0; i < conv.steps.length; i++) {
+      const step = conv.steps[i];
+      const tsMs = tsList[i];
+      if (tsMs <= 0) continue;
+      const entry = { tsMs, totalTokens: step.totalTokens };
+      if (matchesModelQuery(step.modelName, step.modelId, "pool:claude")) {
+        claudeEntries.push(entry);
+      } else if (matchesModelQuery(step.modelName, step.modelId, "pool:gemini")) {
+        geminiEntries.push(entry);
+      } else {
+        otherEntries.push(entry);
+      }
+    }
+  }
+  claudeEntries.sort((a, b) => a.tsMs - b.tsMs);
+  geminiEntries.sort((a, b) => a.tsMs - b.tsMs);
+  otherEntries.sort((a, b) => a.tsMs - b.tsMs);
+  const allEntries = [...claudeEntries, ...geminiEntries, ...otherEntries].sort((a, b) => a.tsMs - b.tsMs);
+  const built: QuotaDetailsIndex = {
+    convCount: allDetails.length,
+    stepTotal,
+    claudeEntries,
+    geminiEntries,
+    otherEntries,
+    allEntries,
+  };
+  QUOTA_DETAILS_INDEX.set(allDetails, built);
+  return built;
+}
 
 /**
  * 职责：从环境变量读取可选的配额周期校准时间戳（ISO-8601 或毫秒时间戳），未配置时返回 undefined 走自动推算。
@@ -189,29 +264,44 @@ export function computeQuotaCycleWindow(
   quotaWindow: QuotaCycleInfo;
   stepTimeFilter: ((modelName: string, modelId: string, tsMs: number) => boolean) | null;
 } {
-  // 0. 按配额池分别收集全工作区调用序列，使 Claude 池与 Gemini 池各自遵守独立重置钟
-  const claudeEntries: Array<{ tsMs: number; totalTokens: number }> = [];
-  const geminiEntries: Array<{ tsMs: number; totalTokens: number }> = [];
-  const otherEntries: Array<{ tsMs: number; totalTokens: number }> = [];
+  // 0. 按配额池分别收集全工作区调用序列（常规全量/双池查询直接复用 WeakMap 预排序索引）
+  const trimmedNeedle = modelQuery.trim().toLowerCase();
+  let claudeEntries: PoolStepEntry[];
+  let geminiEntries: PoolStepEntry[];
+  let otherEntries: PoolStepEntry[];
+  let cachedAllEntries: PoolStepEntry[] | null = null;
 
-  for (const conv of allDetails) {
-    for (const step of conv.steps) {
-      if (modelQuery && !matchesModelQuery(step.modelName, step.modelId, modelQuery)) continue;
-      const tsMs = Date.parse(step.timestamp);
-      if (Number.isNaN(tsMs) || tsMs <= 0) continue;
-      const entry = { tsMs, totalTokens: step.totalTokens };
-      if (matchesModelQuery(step.modelName, step.modelId, "pool:claude")) {
-        claudeEntries.push(entry);
-      } else if (matchesModelQuery(step.modelName, step.modelId, "pool:gemini")) {
-        geminiEntries.push(entry);
-      } else {
-        otherEntries.push(entry);
+  if (!trimmedNeedle || trimmedNeedle === "pool:claude" || trimmedNeedle === "pool:gemini") {
+    const idx = getOrBuildQuotaIndex(allDetails);
+    claudeEntries = trimmedNeedle === "pool:gemini" ? [] : idx.claudeEntries;
+    geminiEntries = trimmedNeedle === "pool:claude" ? [] : idx.geminiEntries;
+    otherEntries = trimmedNeedle ? [] : idx.otherEntries;
+    cachedAllEntries = !trimmedNeedle ? idx.allEntries : null;
+  } else {
+    claudeEntries = [];
+    geminiEntries = [];
+    otherEntries = [];
+    for (const conv of allDetails) {
+      const tsList = getStepsTimestampMs(conv.steps);
+      for (let i = 0; i < conv.steps.length; i++) {
+        const step = conv.steps[i];
+        if (!matchesModelQuery(step.modelName, step.modelId, modelQuery)) continue;
+        const tsMs = tsList[i];
+        if (tsMs <= 0) continue;
+        const entry = { tsMs, totalTokens: step.totalTokens };
+        if (matchesModelQuery(step.modelName, step.modelId, "pool:claude")) {
+          claudeEntries.push(entry);
+        } else if (matchesModelQuery(step.modelName, step.modelId, "pool:gemini")) {
+          geminiEntries.push(entry);
+        } else {
+          otherEntries.push(entry);
+        }
       }
     }
+    claudeEntries.sort((a, b) => a.tsMs - b.tsMs);
+    geminiEntries.sort((a, b) => a.tsMs - b.tsMs);
+    otherEntries.sort((a, b) => a.tsMs - b.tsMs);
   }
-  claudeEntries.sort((a, b) => a.tsMs - b.tsMs);
-  geminiEntries.sort((a, b) => a.tsMs - b.tsMs);
-  otherEntries.sort((a, b) => a.tsMs - b.tsMs);
 
   // 1.1. 分池推算各自的 5h 与 7d 周期块（融合可选环境变量锚点与用户登记的历史重置时间）
   const anchors = useCalibration ? getCalibratedAnchors() : {};
@@ -259,11 +349,11 @@ export function computeQuotaCycleWindow(
 
   // 1.1.1. 汇总当前选中池/模型的完整 7 天周期链（按时间倒序排列供前端展示所有历史账期）
   const merged7dEntries =
-    modelQuery.toLowerCase() === "pool:claude"
+    trimmedNeedle === "pool:claude"
       ? claudeEntries
-      : modelQuery.toLowerCase() === "pool:gemini"
+      : trimmedNeedle === "pool:gemini"
         ? geminiEntries
-        : [...claudeEntries, ...geminiEntries, ...otherEntries].sort((a, b) => a.tsMs - b.tsMs);
+        : cachedAllEntries ?? [...claudeEntries, ...geminiEntries, ...otherEntries].sort((a, b) => a.tsMs - b.tsMs);
   const merged7dAnchors =
     modelQuery.toLowerCase() === "pool:claude"
       ? claude7dAnchors

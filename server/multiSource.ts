@@ -4,6 +4,7 @@
  * Pos: 服务端多数据源编排层，对上透明实现 TelemetryProvider 接口，零重复扫盘并隔离各账号校准与重置记录。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
+import fs from "node:fs";
 import path from "node:path";
 import { computeWeeklyQuotaProjection, resolveWeeklyCalibration } from "../src/lib/format";
 import type {
@@ -458,6 +459,30 @@ export function createMultiSourceTelemetryService(
       .sort((a, b) => b.estimatedCostUsd - a.estimatedCostUsd || b.totalTokens - a.totalTokens);
   };
 
+  // 多源组合响应缓存：数据版本、重置/校准代际与 live-quota 文件指纹均未变时直接复用同一对象引用（让 HTTP 层 ETag/gzip 零序列化命中）
+  const MULTI_CACHE_TTL_MS = 15_000;
+  const MULTI_CACHE_MAX = 24;
+  let stateMutationGen = 0;
+  const multiSummaryCache = new Map<string, { payload: DashboardSummaryPayload; expiresAt: number }>();
+
+  const getLiveQuotaFilesSig = (): string =>
+    entries
+      .map((e) => {
+        if (!e.liveQuotaPath) return "";
+        try {
+          const st = fs.statSync(e.liveQuotaPath);
+          return `${st.mtimeMs}:${st.size}`;
+        } catch {
+          return "0";
+        }
+      })
+      .join("|");
+
+  const invalidateMultiCache = () => {
+    stateMutationGen += 1;
+    multiSummaryCache.clear();
+  };
+
   return {
     getSources() {
       return buildSourcesList({ cycle: "all" });
@@ -469,8 +494,32 @@ export function createMultiSourceTelemetryService(
       const activeSource = targetEntry ? targetEntry.meta.id : "all";
       if (filterOpts.forceRefresh) {
         for (const entry of entries) entry.scanner.scan(true);
+        multiSummaryCache.clear();
       }
       const baseOpts: TelemetryFilterOptions = { ...filterOpts, source: undefined, forceRefresh: false };
+      const scanSig = entries.map((e) => e.scanner.scan(false).version).join(",");
+      const nowMs = filterOpts.nowMs ?? Date.now();
+      const multiKey = JSON.stringify([
+        activeSource,
+        baseOpts.cycle ?? "all",
+        baseOpts.days ?? 0,
+        baseOpts.workspace ?? "",
+        baseOpts.model ?? "",
+        baseOpts.search ?? "",
+        baseOpts.includeArchived !== false,
+        baseOpts.nodeLimit ?? -1,
+        baseOpts.nowMs ?? 0,
+        scanSig,
+        stateMutationGen,
+        getLiveQuotaFilesSig(),
+      ]);
+      if (!filterOpts.forceRefresh) {
+        const hit = multiSummaryCache.get(multiKey);
+        if (hit && nowMs < hit.expiresAt) {
+          return hit.payload;
+        }
+      }
+
       const payload = targetEntry
         ? targetEntry.provider.getSummary(baseOpts)
         : mergedProvider.getSummary(baseOpts);
@@ -489,11 +538,17 @@ export function createMultiSourceTelemetryService(
       const sources = buildSourcesList(
         alignedCycle ? { ...baseOpts, cycle: alignedCycle } : baseOpts
       );
-      return {
+      const assembled: DashboardSummaryPayload = {
         ...payload,
         activeSource,
         sources,
       };
+      if (multiSummaryCache.size >= MULTI_CACHE_MAX) {
+        const oldest = multiSummaryCache.keys().next().value;
+        if (oldest !== undefined) multiSummaryCache.delete(oldest);
+      }
+      multiSummaryCache.set(multiKey, { payload: assembled, expiresAt: nowMs + MULTI_CACHE_TTL_MS });
+      return assembled;
     },
 
     getConversationDetail(conversationId: string, source?: string): ConversationDetail | null {
@@ -528,13 +583,17 @@ export function createMultiSourceTelemetryService(
     addReset(input, source?: string) {
       const target = resolveMutableEntry(source).provider;
       if (!target.addReset) throw new Error("当前数据源未启用重置记录存储");
-      return target.addReset(input);
+      const res = target.addReset(input);
+      invalidateMultiCache();
+      return res;
     },
 
     deleteReset(id: string, source?: string) {
       const target = resolveMutableEntry(source).provider;
       if (!target.deleteReset) throw new Error("当前数据源未启用重置记录存储");
-      return target.deleteReset(id);
+      const res = target.deleteReset(id);
+      invalidateMultiCache();
+      return res;
     },
 
     getCalibrations(source?: string) {
@@ -554,19 +613,25 @@ export function createMultiSourceTelemetryService(
     setCalibration(key, value, opts, sourceId?: string) {
       const target = resolveMutableEntry(sourceId).provider;
       if (!target.setCalibration) throw new Error("当前数据源未启用周校准存储");
-      return target.setCalibration(key, value, opts);
+      const res = target.setCalibration(key, value, opts);
+      invalidateMultiCache();
+      return res;
     },
 
     migrateCalibrationsBatch(entriesMap, sourceId?: string) {
       const target = resolveMutableEntry(sourceId).provider;
       if (!target.migrateCalibrationsBatch) throw new Error("当前数据源未启用周校准批量迁移");
-      return target.migrateCalibrationsBatch(entriesMap);
+      const res = target.migrateCalibrationsBatch(entriesMap);
+      invalidateMultiCache();
+      return res;
     },
 
     deleteCalibration(key, deletedAt, sourceId?: string) {
       const target = resolveMutableEntry(sourceId).provider;
       if (!target.deleteCalibration) throw new Error("当前数据源未启用周校准存储");
-      return target.deleteCalibration(key, deletedAt);
+      const res = target.deleteCalibration(key, deletedAt);
+      invalidateMultiCache();
+      return res;
     },
   };
 }

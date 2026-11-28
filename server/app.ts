@@ -46,40 +46,20 @@ export function resolveUpdateServiceAction(result: Record<string, unknown>): "in
   return result.needRestart ? "restart" : null;
 }
 
-/**
- * 职责：异步调用 scripts/update.mjs 并解析其 JSON 输出，不阻塞主事件循环。
- * 参数：args — 传给 update.mjs 的参数列表；timeoutMs — 执行超时毫秒数。
- * 返回值：Promise<Record<string, unknown>>。
- */
+/** 异步调用 scripts/update.mjs 并解析 JSON 输出，不阻塞主事件循环。 */
 function runUpdateScriptJson(args: string[], timeoutMs: number): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     if (!fs.existsSync(UPDATE_SCRIPT_PATH)) {
       resolve({ ok: false, available: false, behindCount: 0, message: "更新脚本不存在" });
       return;
     }
-    execFile(
-      process.execPath,
-      [UPDATE_SCRIPT_PATH, ...args],
-      { cwd: REPO_ROOT, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 },
-      (err, stdout) => {
-        const text = (stdout || "").trim();
-        if (text) {
-          try {
-            const parsed = JSON.parse(text) as Record<string, unknown>;
-            resolve(parsed);
-            return;
-          } catch {
-            /* 解析失败走下方兜底 */
-          }
-        }
-        resolve({
-          ok: false,
-          available: false,
-          behindCount: 0,
-          message: err instanceof Error ? err.message : "执行更新脚本失败",
-        });
+    execFile(process.execPath, [UPDATE_SCRIPT_PATH, ...args], { cwd: REPO_ROOT, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
+      const text = (stdout || "").trim();
+      if (text) {
+        try { resolve(JSON.parse(text) as Record<string, unknown>); return; } catch { /* 解析失败走下方兜底 */ }
       }
-    );
+      resolve({ ok: false, available: false, behindCount: 0, message: err instanceof Error ? err.message : "执行更新脚本失败" });
+    });
   });
 }
 
@@ -204,11 +184,10 @@ async function readJsonBody(
   return parsed as Record<string, unknown>;
 }
 
-/**
- * 职责：序列化 JSON 载荷并以指定 HTTP 状态码写回客户端。
- * 参数：res — HTTP 响应对象；statusCode — HTTP 状态码；payload — 待序列化数据；extraHeaders — 附加响应头。
- * 返回值：无返回值。
- */
+const JSON_RESPONSE_CACHE = new WeakMap<object, { body: string; etag: string; gz?: Buffer }>(); // 缓存稳定只读响应体的 JSON/ETag/gzip，热轮询与 304 零序列化
+const STATIC_ASSET_CACHE = new Map<string, { sig: string; raw: Buffer; gz?: Buffer }>(); // 缓存不可变哈希静态资源及其 gzip 产物
+
+/** 序列化 JSON 载荷并写回客户端（启用 ETag 时对稳定对象复用序列化/SHA-1/gzip 缓存，支持 304 短路与 >=16KB gzip）。 */
 function sendJson(
   res: http.ServerResponse,
   statusCode: number,
@@ -218,36 +197,37 @@ function sendJson(
   req?: http.IncomingMessage,
   enableEtag = false,
 ): void {
-  // 0. 序列化响应体，按需执行 ETag 304 短路与大载荷（>=16KB）快速 gzip 压缩
-  const body = JSON.stringify(payload);
   setCorsHeaders(res, trustedOrigin);
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json; charset=utf-8",
-    ...extraHeaders,
-  };
+  const headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8", ...extraHeaders };
+  const canCache = enableEtag && statusCode === 200 && Boolean(payload) && typeof payload === "object";
+  let entry = canCache ? JSON_RESPONSE_CACHE.get(payload as object) : undefined;
+  if (!entry) {
+    const body = JSON.stringify(payload);
+    const etag = enableEtag && statusCode === 200 ? `"${crypto.createHash("sha1").update(body).digest("base64url")}"` : "";
+    entry = { body, etag };
+    if (canCache) JSON_RESPONSE_CACHE.set(payload as object, entry);
+  }
   if (enableEtag && statusCode === 200) {
-    const etag = `"${crypto.createHash("sha1").update(body).digest("base64url")}"`;
-    headers.ETag = etag;
+    headers.ETag = entry.etag;
     headers["Cache-Control"] = "no-cache";
     const inm = String(req?.headers["if-none-match"] || "").trim();
-    if (inm === etag || inm === `W/${etag}`) {
+    if (inm === entry.etag || inm === `W/${entry.etag}`) {
       res.writeHead(304, headers);
       res.end();
       return;
     }
   }
   const acceptEnc = String(req?.headers["accept-encoding"] || "");
-  if (body.length >= 16_384 && /\bgzip\b/i.test(acceptEnc)) {
-    const gz = zlib.gzipSync(body, { level: 1 });
+  if (entry.body.length >= 16_384 && /\bgzip\b/i.test(acceptEnc)) {
+    const gz = entry.gz ?? (entry.gz = zlib.gzipSync(entry.body, { level: 1 }));
     headers["Content-Encoding"] = "gzip";
     headers.Vary = trustedOrigin ? "Origin, Accept-Encoding" : "Accept-Encoding";
     res.writeHead(statusCode, headers);
     res.end(gz);
     return;
   }
-  // 1.1. 输出 UTF-8 JSON 正文并结束响应
   res.writeHead(statusCode, headers);
-  res.end(body);
+  res.end(entry.body);
 }
 
 /**
@@ -415,18 +395,29 @@ function serveStaticOrFallback(
     const ext = path.extname(realCandidate).toLowerCase();
     const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
     const isHashedAsset = realRel.startsWith(`assets${path.sep}`) || realRel.startsWith("assets/");
-    const rawBuf = fs.readFileSync(realCandidate);
     const acceptEnc = String(req?.headers["accept-encoding"] || "");
     const headers: Record<string, string> = {
       "Content-Type": contentType,
       "Cache-Control": isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache",
     };
     setCorsHeaders(res, trustedOrigin);
+    let cachedAsset = isHashedAsset ? STATIC_ASSET_CACHE.get(realCandidate) : undefined;
+    if (isHashedAsset) {
+      const st = fs.statSync(realCandidate);
+      const sig = `${st.mtimeMs}:${st.size}`;
+      if (!cachedAsset || cachedAsset.sig !== sig) {
+        cachedAsset = { sig, raw: fs.readFileSync(realCandidate) };
+        if (STATIC_ASSET_CACHE.size >= 16) STATIC_ASSET_CACHE.clear();
+        STATIC_ASSET_CACHE.set(realCandidate, cachedAsset);
+      }
+    }
+    const rawBuf = cachedAsset ? cachedAsset.raw : fs.readFileSync(realCandidate);
     if (rawBuf.length >= 16_384 && /\bgzip\b/i.test(acceptEnc) && (ext === ".js" || ext === ".css" || ext === ".svg")) {
+      const gz = cachedAsset ? (cachedAsset.gz ?? (cachedAsset.gz = zlib.gzipSync(rawBuf, { level: 1 }))) : zlib.gzipSync(rawBuf, { level: 1 });
       headers["Content-Encoding"] = "gzip";
       headers.Vary = trustedOrigin ? "Origin, Accept-Encoding" : "Accept-Encoding";
       res.writeHead(200, headers);
-      res.end(zlib.gzipSync(rawBuf, { level: 1 }));
+      res.end(gz);
       return;
     }
     res.writeHead(200, headers);
@@ -739,7 +730,7 @@ export function createTelemetryHttpServer(
         return;
       }
 
-      // 1.3. 单会话详情路由（支持 URL 编码 ID 与可选 source 过滤）
+      // 1.3. 单会话详情路由（支持 URL 编码 ID、可选 source 过滤、ETag 304 与大载荷 gzip 压缩）
       if (pathname.startsWith("/api/conversations/")) {
         const rawId = pathname.slice("/api/conversations/".length);
         if (!rawId || rawId.includes("/")) {
@@ -752,7 +743,7 @@ export function createTelemetryHttpServer(
           replyJson(404, { error: "Conversation not found" });
           return;
         }
-        replyJson(200, detail);
+        sendJson(res, 200, detail, undefined, trustedOrigin, req, true);
         return;
       }
 

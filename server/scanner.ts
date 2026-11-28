@@ -68,14 +68,55 @@ function getSnapshotGenSig(filePath: string): string {
 }
 
 /**
- * 职责：将 SQLite 活跃 -wal 与主库在代际一致校验下复制至独立临时快照目录后再打开，严格保证源目录零新增/零写入且不漏读活跃 WAL 已提交行。
- * 思路：1) 拷贝前后校验主库与 -wal 的 stat 代际（先拷 -wal 再拷主库），若期间发生 checkpoint 或写入则重取（最多 3 次，仍不稳定则抛错交由上层不缓存并下轮重试）；2) 存在活跃 WAL 时绝不降级至忽略 WAL 的 immutable=1；3) 包装 db.close 并返回 cleanup 回收临时目录。
+ * 职责：零拷贝优先只读打开 SQLite（无活跃 WAL 走 immutable=1；有活跃 WAL 且 -shm 存在时直连 readOnly WAL，彻底消除 1GB+ 会话库反复临时拷贝），仅对缺失 -shm 或直读受阻的活跃 WAL 回退一致临时快照，保证源目录零新增/零写入且不漏读活跃 WAL 已提交行。
  * 参数：dbPath — SQLite 文件绝对路径。
  * 返回值：包含 DatabaseSync 实例、读取模式与 cleanup 回收函数的对象。
  */
 export function openSqliteSafe(
   dbPath: string,
 ): { db: DatabaseSync; mode: "wal-readonly" | "immutable-fallback"; cleanup: () => void } {
+  const walSrc = `${dbPath}-wal`;
+  const shmSrc = `${dbPath}-shm`;
+  const noop = () => undefined;
+
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`SQLite 源文件不存在: ${dbPath}`);
+  }
+
+  let walSize = 0;
+  try {
+    walSize = fs.statSync(walSrc).size;
+  } catch {
+    walSize = 0;
+  }
+
+  // 0. 零拷贝快速路径 A：无活跃 WAL 时直开 immutable=1 只读（零文件创建、零磁盘拷贝）
+  if (walSize === 0) {
+    let db: DatabaseSync | null = null;
+    try {
+      db = new DatabaseSync(`file:${dbPath}?immutable=1`, { readOnly: true });
+      db.prepare("SELECT count(*) FROM sqlite_master").get();
+      return { db, mode: "wal-readonly", cleanup: noop };
+    } catch {
+      try { db?.close(); } catch { /* ignore */ }
+      /* 失败时交由下方快照拷贝兜底（如损坏头或并发刚写入） */
+    }
+  }
+
+  // 0.1. 零拷贝快速路径 B：存在活跃 WAL 且 -shm 已存在时直连 readOnly WAL 读取（不创建旁文件、不拷贝数十 MB 会话库）
+  if (walSize > 0 && fs.existsSync(shmSrc)) {
+    let db: DatabaseSync | null = null;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      db.exec("PRAGMA busy_timeout = 200; PRAGMA query_only = ON;");
+      db.prepare("SELECT count(*) FROM sqlite_master").get();
+      return { db, mode: "wal-readonly", cleanup: noop };
+    } catch {
+      try { db?.close(); } catch { /* ignore */ }
+      /* 并发锁冲突或只读受限时回退隔离临时快照 */
+    }
+  }
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hamiji-ro-"));
   let cleaned = false;
   const cleanup = () => {
@@ -86,7 +127,6 @@ export function openSqliteSafe(
 
   const snapDb = path.join(tmpDir, path.basename(dbPath));
   const snapWal = `${snapDb}-wal`;
-  const walSrc = `${dbPath}-wal`;
   let hasWal = false;
   let consistent = false;
 
@@ -137,7 +177,7 @@ export function openSqliteSafe(
     return db;
   };
 
-  // 0. 有活跃 WAL 时严格在隔离临时副本中重放 WAL，失败时直接抛错绝不降级为忽略 WAL 的 immutable=1
+  // 1. 有活跃 WAL 时严格在隔离临时副本中重放 WAL，失败时直接抛错绝不降级为忽略 WAL 的 immutable=1
   let primaryDb: DatabaseSync | null = null;
   try {
     primaryDb = hasWal ? new DatabaseSync(snapDb) : new DatabaseSync(`file:${snapDb}?immutable=1`, { readOnly: true });
@@ -236,11 +276,30 @@ function parseTranscriptJsonl(jsonlPath: string, fallbackIso: string) {
   let maxStepIndex = -1;
   if (!fs.existsSync(jsonlPath)) return { steps, firstPromptPreview, activeModelFromSettings, maxStepIndex, earliestAt, latestAt };
 
-  // 1. 逐行解析 JSON，容错未刷盘残行
+  // 1. 逐行解析 JSON，对超大非推理行（GENERIC 工具输出等）走轻量头字段快扫，跳过无谓的全量 JSON.parse
+  const STEP_IDX_RE = /"(?:step_index|stepIndex)"\s*:\s*(\d+)/;
+  const CREATED_AT_RE = /"(?:created_at|timestamp)"\s*:\s*"([^"]+)"/;
   const lines = fs.readFileSync(jsonlPath, "utf8").split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
+    if (
+      line.length > 1024 &&
+      !line.includes('"PLANNER_RESPONSE"') &&
+      !line.includes('"USER_INPUT"')
+    ) {
+      const head = line.slice(0, 512);
+      const sm = head.match(STEP_IDX_RE) ?? line.slice(-256).match(STEP_IDX_RE);
+      const stepIndex = sm ? Number(sm[1]) : i;
+      if (stepIndex > maxStepIndex) maxStepIndex = stepIndex;
+      const tm = head.match(CREATED_AT_RE) ?? line.slice(-256).match(CREATED_AT_RE);
+      if (tm) {
+        const ts = normalizeIsoTime(tm[1], "");
+        if (ts && (!earliestAt || ts < earliestAt)) earliestAt = ts;
+        if (ts && (!latestAt || ts > latestAt)) latestAt = ts;
+      }
+      continue;
+    }
     try {
       const obj = JSON.parse(line) as Record<string, unknown>;
       const stepIndex = typeof obj.step_index === "number" ? obj.step_index : typeof obj.stepIndex === "number" ? obj.stepIndex : i;
@@ -308,12 +367,29 @@ function mergeHybridSteps(dbMetas: ParsedGenMetadata[], jsonlSteps: JsonlStepIte
   // 0. 过滤全 0 Token 的取消/中断空元数据行，避免错配 JSONL 步号或以最新时间漂移至图表尾部形成伪 0% 跌零
   const activeDbMetas = dbMetas.filter((m) => m.inputTokens + m.cacheReadTokens + m.outputTokens > 0);
 
-  // 0.1. 双轮配对索引（1: 精确步号关联；2: 仅对缺失 lastStepIndex 的 DB 行按顺序回退，绝不合并冲突步号）
+  // 0.1. O(N) 哈希索引双轮配对（1: 精确步号关联；2: 仅对缺失 lastStepIndex 的 DB 行按顺序回退，绝不合并冲突步号）
   const usedDb = new Set<number>();
   const jsonlToDb = new Map<number, number>();
+  const dbIdxByStep = new Map<number, number[]>();
+  for (let d = 0; d < activeDbMetas.length; d++) {
+    const lsi = activeDbMetas[d].lastStepIndex;
+    if (lsi !== null) {
+      const key = lsi + 1;
+      const bucket = dbIdxByStep.get(key);
+      if (bucket) bucket.push(d);
+      else dbIdxByStep.set(key, [d]);
+    }
+  }
   for (let j = 0; j < jsonlSteps.length; j++) {
-    const idx = activeDbMetas.findIndex((m, d) => !usedDb.has(d) && m.lastStepIndex !== null && m.lastStepIndex + 1 === jsonlSteps[j].stepIndex);
-    if (idx !== -1) { usedDb.add(idx); jsonlToDb.set(j, idx); }
+    const bucket = dbIdxByStep.get(jsonlSteps[j].stepIndex);
+    if (!bucket) continue;
+    for (const d of bucket) {
+      if (!usedDb.has(d)) {
+        usedDb.add(d);
+        jsonlToDb.set(j, d);
+        break;
+      }
+    }
   }
   let cursor = 0;
   for (let j = 0; j < jsonlSteps.length; j++) {
