@@ -28,4 +28,4 @@ npm run hook:compact:install   # 手动安装/重装 400K 上下文 /compact 软
 - **周满额与重置日历**：输入官方剩余 `%` 反算周满额（装有 `agy` CLI 时自动通过官方 `statusLine` 回填）；`/calendar` 查看公共强制重置与个人重置日历。
 - **趋势与缓存 TTL**：每日/今日消耗、缓存命中率（自动区分新会话首轮与真失效）、实测 TTL 衰减曲线与单次 TPS。
 - **主会话明细**：Subagent 自动合并折叠、表头直点排序、`/` 搜索、「缓存仍热」一键筛选、逐轮倒序明细弹窗。
-- **400K 上下文压缩软提醒**：`npm run service:install` 会自动无侵入注册至 `~/.gemini/config/hooks.json`（保留已有 Hook、跳过同名自定义配置，设 `AGY_SKIP_COMPACT_HOOK=1` 可跳过，或随时 `npm run hook:compact:uninstall` 卸载）；每个压缩周期上下文首次达到 400K（约 512K 的 78%）时向模型注入一次性系统软提醒并在回复末尾拟好 `/compact` 指令（零熔断，省略 `metadata` 以兼容 Antigravity 宿主）。
+- **400K 上下文压缩软提醒**：`npm run service:install` 会自动无侵入注册至 `~/.gemini/config/hooks.json`（保留已有 Hook、跳过同名自定义配置，设 `AGY_SKIP_COMPACT_HOOK=1` 可跳过，或随时 `npm run hook:compact:uninstall` 卸载）；每个压缩周期上下文首次达到 400K（约 512K 的 78%）时通过 `PreInvocation` 引导模型在回复末尾渲染醒目压缩卡片与可复制 `/compact` 指令（省略 `metadata` 规避 Antigravity 宿主 panic），并由 `Stop` Hook 兜底补发一次卡片防止长轮次遗漏（零熔断、绝不死循环）。

@@ -1,6 +1,6 @@
 /**
  * Input: vitest 断言工具、node:fs/os/path/child_process，以及 scripts/compact-reminder-hook.mjs 导出函数。
- * Output: 覆盖 400K 上下文软提醒 Hook 的触发阈值、零熔断、防宿主 metadata panic 回归、周期去重、CHECKPOINT/回落重置、跨块 UTF-8 边界、CLI 管道及无侵入安装卸载测试。
+ * Output: 覆盖 400K 上下文软提醒 Hook 的触发阈值、零熔断、防宿主 metadata panic 回归、Stop 兜底补卡与防死循环、周期去重、CHECKPOINT/回落重置、跨块 UTF-8 边界、CLI 管道及无侵入安装卸载测试。
  * Pos: 可选 400K 压缩软提醒 Hook 单元测试套件（tests/compactReminder.test.ts）。
  * 我被更新时，必须同步更新本头注释 + 所属目录 README/INDEX。
  */
@@ -16,7 +16,10 @@ const SCRIPT_ABS = path.resolve(process.cwd(), "scripts/compact-reminder-hook.mj
 interface HookModule {
   HOOK_KEY: string;
   REMINDER_MARKER: string;
+  STOP_REMINDER_MARKER: string;
+  CARD_HEADING_PREFIX: string;
   handlePreInvocation: (payload: Record<string, unknown>) => Record<string, unknown>;
+  handleStop: (payload: Record<string, unknown>) => Record<string, unknown>;
   installCompactReminderHook: (opts?: { hooksPath?: string; expectedCmd?: string }) => {
     installed: boolean;
     reason: string;
@@ -134,6 +137,111 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
     expect(parsed.terminationBehavior).toBe("");
     expect(parsed.injectSteps).toHaveLength(1);
     expect(parsed.injectSteps[0].systemMessage.metadata).toBeUndefined();
+    expect(parsed.injectSteps[0].systemMessage.systemMessage).toContain(mod.CARD_HEADING_PREFIX);
+  });
+
+  it("uses Stop hook as a single-shot visible-card fallback without looping when model omits the card", async () => {
+    const mod = (await import(pathToFileURL(SCRIPT_ABS).href)) as HookModule;
+    const dir = mkTmp("hamiji-compact-stop-");
+
+    // 1. PreInvocation 已注入但模型长轮次遗漏卡片：首次 NO_TOOL_CALL (executionNum=0) 触发一次补卡
+    const forgotPath = writeJsonl(dir, "forgot.jsonl", [
+      { type: "PLANNER_RESPONSE", input_tokens: 5_000, cache_read_tokens: 410_000, content: "" },
+      { type: "SYSTEM_MESSAGE", content: `${mod.REMINDER_MARKER} sent` },
+      { type: "PLANNER_RESPONSE", input_tokens: 6_000, cache_read_tokens: 420_000, content: "任务已完成，未附带压缩卡。" },
+    ]);
+    const stopRes = mod.handleStop({
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: false,
+      executionNum: 0,
+      transcriptPath: forgotPath,
+      modelName: "gemini-4-neon-xhigh",
+    }) as { decision?: string; reason?: string };
+    expect(stopRes.decision).toBe("continue");
+    expect(stopRes.reason).toContain(mod.STOP_REMINDER_MARKER);
+    expect(stopRes.reason).toContain(`${mod.CARD_HEADING_PREFIX}426K / 512K`);
+
+    // 2. 防死循环硬门禁：executionNum > 0、continuationActive=true、非 NO_TOOL_CALL 均放行停止
+    expect(
+      mod.handleStop({
+        hookEventName: "Stop",
+        terminationReason: "NO_TOOL_CALL",
+        continuationActive: false,
+        executionNum: 1,
+        transcriptPath: forgotPath,
+      })
+    ).toEqual({});
+    expect(
+      mod.handleStop({
+        hookEventName: "Stop",
+        terminationReason: "NO_TOOL_CALL",
+        continuationActive: true,
+        executionNum: 0,
+        transcriptPath: forgotPath,
+      })
+    ).toEqual({});
+    expect(
+      mod.handleStop({
+        hookEventName: "Stop",
+        terminationReason: "ERROR",
+        continuationActive: false,
+        executionNum: 0,
+        transcriptPath: forgotPath,
+      })
+    ).toEqual({});
+
+    // 3. 若模型已渲染可见卡片或本周期已触发过 Stop 补卡：零额外调用直接放行
+    const renderedPath = writeJsonl(dir, "rendered.jsonl", [
+      { type: "PLANNER_RESPONSE", input_tokens: 5_000, cache_read_tokens: 410_000, content: "" },
+      { type: "SYSTEM_MESSAGE", content: `${mod.REMINDER_MARKER} sent` },
+      {
+        type: "PLANNER_RESPONSE",
+        input_tokens: 6_000,
+        cache_read_tokens: 420_000,
+        content: `已完成。\n### ***${mod.CARD_HEADING_PREFIX}426K / 512K）***\n/compact 保留核心结论`,
+      },
+    ]);
+    expect(
+      mod.handleStop({
+        hookEventName: "Stop",
+        terminationReason: "NO_TOOL_CALL",
+        continuationActive: false,
+        executionNum: 0,
+        transcriptPath: renderedPath,
+      })
+    ).toEqual({});
+
+    const stopAlreadySentPath = writeJsonl(dir, "stop-sent.jsonl", [
+      { type: "PLANNER_RESPONSE", input_tokens: 5_000, cache_read_tokens: 410_000, content: "done" },
+      { type: "SYSTEM_MESSAGE", content: `Stop hook blocked termination: ${mod.STOP_REMINDER_MARKER}` },
+      { type: "PLANNER_RESPONSE", input_tokens: 6_000, cache_read_tokens: 420_000, content: "next turn" },
+    ]);
+    expect(
+      mod.handleStop({
+        hookEventName: "Stop",
+        terminationReason: "NO_TOOL_CALL",
+        continuationActive: false,
+        executionNum: 0,
+        transcriptPath: stopAlreadySentPath,
+      })
+    ).toEqual({});
+
+    // 4. CLI 管道路由 hookEventName: "Stop"
+    const stopStdout = execFileSync(process.execPath, [SCRIPT_ABS], {
+      input: JSON.stringify({
+        hookEventName: "Stop",
+        terminationReason: "NO_TOOL_CALL",
+        continuationActive: false,
+        executionNum: 0,
+        transcriptPath: forgotPath,
+        modelName: "gemini-4-neon-xhigh",
+      }),
+      encoding: "utf8",
+    });
+    const stopParsed = JSON.parse(stopStdout.trim()) as { decision?: string; reason?: string };
+    expect(stopParsed.decision).toBe("continue");
+    expect(stopParsed.reason).toContain(mod.STOP_REMINDER_MARKER);
   });
 
   it("installs and uninstalls safely into hooks.json without clobbering existing or custom hooks", async () => {
@@ -145,9 +253,26 @@ describe("400K Context Compact Soft-Reminder Hook", () => {
     fs.writeFileSync(hooksPath, JSON.stringify({ ponytail: { enabled: true, SessionStart: [] } }), "utf8");
     const installed = mod.installCompactReminderHook({ hooksPath });
     expect(installed.installed).toBe(true);
-    const afterInstall = JSON.parse(fs.readFileSync(hooksPath, "utf8")) as Record<string, unknown>;
+    const afterInstall = JSON.parse(fs.readFileSync(hooksPath, "utf8")) as Record<string, { PreInvocation?: unknown[]; Stop?: unknown[] }>;
     expect(afterInstall.ponytail).toEqual({ enabled: true, SessionStart: [] });
-    expect(afterInstall[mod.HOOK_KEY]).toBeTruthy();
+    expect(afterInstall[mod.HOOK_KEY]?.PreInvocation).toHaveLength(1);
+    expect(afterInstall[mod.HOOK_KEY]?.Stop).toHaveLength(1);
+
+    // 1.5 旧版仅含 PreInvocation 的本脚本条目可无损升级补齐 Stop（同时保留 ponytail）
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify({
+        ponytail: { enabled: true, SessionStart: [] },
+        [mod.HOOK_KEY]: {
+          enabled: true,
+          PreInvocation: [{ type: "command", command: `node "${SCRIPT_ABS}"`, timeout: 5 }],
+        },
+      }),
+      "utf8"
+    );
+    expect(mod.installCompactReminderHook({ hooksPath }).installed).toBe(true);
+    const upgraded = JSON.parse(fs.readFileSync(hooksPath, "utf8")) as Record<string, { Stop?: unknown[] }>;
+    expect(upgraded[mod.HOOK_KEY]?.Stop).toHaveLength(1);
 
     // 2. 卸载只删除本 Hook，完整保留 ponytail
     const removed = mod.uninstallCompactReminderHook({ hooksPath });

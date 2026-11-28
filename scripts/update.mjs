@@ -493,7 +493,7 @@ export function performUpdate(options = {}) {
       const diffBuild =
         diffInstall ||
         changedFiles.some((f) => f.startsWith("src/") || f === "index.html" || f === "vite.config.ts" || f === "tsconfig.json");
-      const diffReinstallService = changedFiles.includes("scripts/service.mjs");
+      const diffReinstallService = changedFiles.includes("scripts/service.mjs") || changedFiles.includes("scripts/compact-reminder-hook.mjs");
       const diffRestart = diffBuild || diffReinstallService || changedFiles.some((f) => f.startsWith("server/") || f.startsWith("scripts/"));
 
       const headItselfUnapplied = prevState.appliedCommit !== headBefore;
